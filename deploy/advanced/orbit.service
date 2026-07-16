@@ -1,0 +1,66 @@
+[Unit]
+Description=orbit — personal hub for your-host (with orchestrator panel)
+After=network-online.target tailscaled.service user@YOUR_UID.service
+Wants=network-online.target
+# Detached sessions spawn the tmux server into the per-user manager's cgroup
+# via the user bus (/run/user/YOUR_UID/bus). Order after user@YOUR_UID.service so the
+# bus is up before boot — otherwise a cold-reboot race makes the first
+# sessions spawn in-cgroup (non-surviving) until the next restart. YOUR_UID is your uid.
+Wants=user@YOUR_UID.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+Group=YOUR_USER
+# Runs from the clean RUN checkout ~/srv (NOT the dev checkout ~/Projects) —
+# deploy.sh git-reset --hard's ~/srv, so dev work in ~/Projects never fights it.
+WorkingDirectory=/home/YOUR_USER/srv/orbit
+# Blue (canonical) instance: binds 8766 and OWNS the cron scheduler. Zero-
+# downtime deploys are done by deploy/deploy.sh, which floats traffic onto a
+# transient standby instance (8866, HD_STANDBY=1, no scheduler) via an nginx
+# upstream flip while THIS instance restarts onto new code.
+ExecStart=/usr/local/bin/uv run --directory /home/YOUR_USER/srv/orbit python -m orbit --host 127.0.0.1 --port 8766
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=CLAUDE_CONFIG_DIR=/home/YOUR_USER/.claude
+# Detached orchestrator sessions: the tmux server is launched into a
+# user-manager scope so it outlives `systemctl restart` (see
+# orchestrator_tmux._user_scope_prefix). systemd-run --user + tmux's native
+# scope integration both reach the per-user bus via XDG_RUNTIME_DIR, which a
+# system service does NOT get by default. Requires linger for the user
+# (`loginctl enable-linger YOUR_USER`). YOUR_UID = YOUR_USER's uid.
+Environment=XDG_RUNTIME_DIR=/run/user/YOUR_UID
+# Pin the -L hd-orch tmux socket dir from PROCESS EXEC (not just after start via
+# ensure_tmux_socket_dir). PrivateTmp=true makes the default /tmp socket a
+# per-start ephemeral mount, so without a stable TMUX_TMPDIR a restart can fail
+# to resolve the surviving server's socket and spawn a SECOND server — orphaning
+# the first + all its claude REPLs (~0.5 GB each, leaked invisibly). A fixed
+# host-fs path keeps every generation on the same socket so restarts re-adopt
+# the survivor instead of stranding it. Must match _detached_socket_dir().
+Environment=TMUX_TMPDIR=/home/YOUR_USER/.orchestrator/tmux
+# config/override.yaml is gitignored, so the ~/srv RUN checkout lacks it. Point
+# BOTH instances at the single canonical copy in the dev checkout so the Tasks
+# tab + label/icon overrides keep working with no copy/drift. config.py honors
+# $DASHBOARD_OVERRIDE over its __file__-relative default.
+Environment=DASHBOARD_OVERRIDE=/home/YOUR_USER/Projects/orbit/config/override.yaml
+
+# Hardening
+# Orchestrator agent is the user's primary on-server assistant. It is
+# expected to have the same effective capabilities as an interactive ssh
+# session (read ~/.zsh_secrets for HA_TOKEN, edit anything in ~, etc.).
+# The single user is the operator; this is a trusted single-tenant box on
+# Tailscale-only. The agent is given full operator parity with an interactive
+# ssh session: NoNewPrivileges=false so it can sudo (YOUR_USER has passwordless
+# sudo), ProtectSystem=false so it can edit /etc (nginx, systemd units) and
+# manage services. PrivateTmp stays on only because the tmux socket design
+# (TMUX_TMPDIR pinned off /tmp) depends on it; it is not a security boundary here.
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=/home/YOUR_USER
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=orbit continuous delivery — pull main + zero-downtime deploy
+After=network-online.target
+Wants=network-online.target
+# Don't fight a manual/in-progress service restart.
+After=orbit.service
+
+[Service]
+Type=oneshot
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/srv/orbit
+# Fallback poller (the self-hosted Actions runner is the primary, near-instant
+# path). deploy.sh lives in + operates on the ~/srv RUN checkout; it is a no-op
+# when origin/main == HEAD and flock-guarded, so a timer tick can't race the
+# runner-fired deploy.
+ExecStart=/home/YOUR_USER/srv/orbit/deploy/deploy.sh
+StandardOutput=journal
+StandardError=journal

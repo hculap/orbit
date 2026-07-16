@@ -1,0 +1,14 @@
+[Unit]
+Description=Poll origin/main and zero-downtime-deploy orbit (continuous delivery)
+
+[Timer]
+# Continuous delivery: poll main every 2 min. A push to main lands on the box
+# within ~2 min via a zero-downtime restart (deploy.sh no-ops when unchanged).
+OnBootSec=2min
+OnUnitActiveSec=2min
+# Don't stack runs if one is slow.
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

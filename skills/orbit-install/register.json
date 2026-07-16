@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Provision Orbit for the user end-to-end as an interactive install wizard — a new Hetzner VPS, an existing VPS over SSH, or the local machine; Tailscale-only or public-with-auth; core dashboard plus optional orchestrator/tasks/notifications. Asks before anything that costs money, opens a port, weakens security, or writes a secret.",
+  "icon": "🛰️",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

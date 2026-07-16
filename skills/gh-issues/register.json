@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Manage the current project/area's GitHub Issues as a persistent cross-session todo — list/create/edit/comment/close/reopen/search, and promote an issue to a global Task. Repo auto-detected from cwd.",
+  "icon": "🗒️",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

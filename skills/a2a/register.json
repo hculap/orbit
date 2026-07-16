@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Send messages BETWEEN Claude Code agents on this host (agent-to-agent). `send` is a PURE ENQUEUE — the dashboard writes the message into the target agent's maildir and returns; there is NO push/revive, the target's human drains it later. Verbs: list (warm/cold roster + PARA dir + sessions), whois <lib_id> (one agent's full identity + dir + all sessions incl. transcript paths), send --to <lib_id|global> (enqueue a message), inbox --drain (read your own mailbox), read <id>. Use to hand off work to or reply to another agent — NOT for talking to the human user.",
+  "icon": "📬",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

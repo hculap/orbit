@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Create rich, persistent artifacts — Chart.js charts, Leaflet maps, YouTube embeds, audio/video clips, interactive HTML, generated images, downloadable files — saved into the agent's .artifacts/ dir and surfaced in the dashboard as a toast/modal + gallery. Use whenever a deliverable is visual, interactive, playable, downloadable, or worth keeping.",
+  "icon": "🎨",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

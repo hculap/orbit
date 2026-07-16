@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Local override (not committed — secrets/personal labels)
+config/override.yaml
+
+# Secrets / environment
+.env
+.env.*
+
+# Per-skill runtime config (concrete, machine-local)
+skills/*/config.json
+
+# Server-side runtime state (created by the running app on Hetzner)
+.library.json
+
+# Editor/OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Local Claude Code state (worktrees, session caches)
+.claude/
+
+# Agent artifact gallery (per-session scratch previews — not app source)
+.artifacts/
+
+# design-system analysis scratch (provenance, not shipped)
+docs/design-system/.audit/

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Test trasy audio (A2DP/HFP) — Hub</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3;
+         margin: 0; padding: 20px; line-height: 1.5; }
+  h1 { font-size: 18px; }
+  button { display: block; width: 100%; padding: 16px; margin: 10px 0; font-size: 17px;
+           border-radius: 12px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; }
+  button:active { background: #30363d; }
+  #status { padding: 12px; border-radius: 10px; background: #161b22; border: 1px solid #30363d;
+            min-height: 80px; font-size: 15px; white-space: pre-wrap; }
+  .ok { color: #3fb950; } .warn { color: #d29922; } .err { color: #f85149; }
+  small { color: #8b949e; display: block; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h1>🎧 Test trasy audio w aucie (A2DP vs HFP)</h1>
+<div id="status">Krok 1: połącz telefon z autem przez Bluetooth i odpal muzykę testową.</div>
+<button id="play">1. Graj dźwięk testowy (pętla)</button>
+<button id="micPinned">2. Otwórz mikrofon PRZYPIĘTY (wbudowany iPhone)</button>
+<button id="micDefault">3. Otwórz mikrofon DOMYŚLNY (porównanie)</button>
+<button id="stopMic">4. Zamknij mikrofon</button>
+<small>
+Procedura: (1) graj dźwięk — powinien lecieć hi-fi z głośników auta (A2DP).
+(2) otwórz mikrofon przypięty — jeśli dźwięk ZOSTAJE hi-fi i auto NIE wchodzi w tryb
+połączenia, pinning działa → pętla głosowa będzie czysta. (3) porównaj z domyślnym —
+zwykle flipuje na HFP (jakość telefonu, 1–3 s dziury). (4) zamknij i sprawdź powrót.
+Wynik podyktuj Claude'owi po teście.
+</small>
+<script>
+(function () {
+  var statusEl = document.getElementById('status');
+  var audio = null;
+  var stream = null;
+
+  function log(msg, cls) {
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = msg;
+    statusEl.appendChild(line);
+    statusEl.scrollTop = statusEl.scrollHeight;
+  }
+
+  // ~1s 440 Hz sine WAV generated client-side → looped <audio> (the same
+  // HTMLAudioElement path the TTS uses, so the A2DP behavior matches).
+  function beepWavUrl() {
+    var rate = 22050, secs = 1.0, n = Math.floor(rate * secs);
+    var buf = new ArrayBuffer(44 + n * 2);
+    var v = new DataView(buf);
+    function wstr(off, s) { for (var i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); }
+    wstr(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); wstr(8, 'WAVE');
+    wstr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    wstr(36, 'data'); v.setUint32(40, n * 2, true);
+    for (var i = 0; i < n; i++) {
+      var t = i / rate;
+      var amp = 0.25 * Math.sin(2 * Math.PI * 440 * t) * (0.5 + 0.5 * Math.sin(2 * Math.PI * 2 * t));
+      v.setInt16(44 + i * 2, amp * 32767, true);
+    }
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  }
+
+  function pickBuiltInId(devices) {
+    var inputs = devices.filter(function (d) { return d.kind === 'audioinput'; });
+    inputs.forEach(function (d) { log('  wejście: "' + (d.label || '(bez nazwy)') + '"'); });
+    var builtIn = inputs.find(function (d) { return /iphone|built-in|wbudowan/i.test(d.label || ''); });
+    if (!builtIn) builtIn = inputs.find(function (d) { return !/bluetooth|airpods|car|hands|samoch/i.test(d.label || '') && d.deviceId !== 'default'; });
+    return builtIn ? builtIn.deviceId : '';
+  }
+
+  function openMic(pinned) {
+    // Close any previous capture first — two live streams would confound the
+    // route observation (which one holds the audio session?).
+    if (stream) {
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      stream = null;
+      log('(poprzedni mikrofon zamknięty)');
+    }
+    var base = { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true };
+    var p = pinned
+      ? navigator.mediaDevices.getUserMedia({ audio: base }).then(function (tmp) {
+          // First grant unlocks labels; enumerate, pick built-in, reopen pinned.
+          return navigator.mediaDevices.enumerateDevices().then(function (devices) {
+            tmp.getTracks().forEach(function (t) { t.stop(); });
+            var id = pickBuiltInId(devices);
+            if (!id) { log('Nie znalazłem wbudowanego mikrofonu po nazwie — używam domyślnego.', 'warn'); }
+            var c = id ? Object.assign({}, base, { deviceId: { exact: id } }) : base;
+            return navigator.mediaDevices.getUserMedia({ audio: c });
+          });
+        })
+      : navigator.mediaDevices.getUserMedia({ audio: base });
+    p.then(function (s) {
+      stream = s;
+      var track = s.getAudioTracks()[0];
+      var st = track && track.getSettings ? track.getSettings() : {};
+      log('Mikrofon OTWARTY (' + (pinned ? 'przypięty' : 'domyślny') + '): "' + (track ? track.label : '?') + '"', 'ok');
+      log('  deviceId: ' + (st.deviceId || '?').slice(0, 16) + '…, sampleRate: ' + (st.sampleRate || '?'));
+      log('SŁUCHAJ TERAZ: czy dźwięk testowy dalej gra hi-fi z auta? Czy auto weszło w tryb połączenia?', 'warn');
+    }).catch(function (e) {
+      log('Błąd mikrofonu: ' + (e && e.message ? e.message : e), 'err');
+    });
+  }
+
+  document.getElementById('play').addEventListener('click', function () {
+    if (audio) { audio.pause(); audio = null; log('Dźwięk zatrzymany.'); return; }
+    audio = new Audio(beepWavUrl());
+    audio.loop = true;
+    audio.play().then(function () { log('Dźwięk testowy gra (pętla). Powinien lecieć przez głośniki auta.', 'ok'); })
+      .catch(function (e) { log('Autoplay odrzucony: ' + e.message, 'err'); });
+  });
+  document.getElementById('micPinned').addEventListener('click', function () { openMic(true); });
+  document.getElementById('micDefault').addEventListener('click', function () { openMic(false); });
+  document.getElementById('stopMic').addEventListener('click', function () {
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; log('Mikrofon ZAMKNIĘTY. Czy dźwięk wrócił do hi-fi?', 'warn'); }
+    else log('Mikrofon nie był otwarty.');
+  });
+})();
+</script>
+</body>
+</html>

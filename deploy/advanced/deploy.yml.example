@@ -1,0 +1,45 @@
+# ADVANCED / REFERENCE — zero-downtime blue-green CD via a self-hosted runner.
+#
+# This is NOT wired into the public repo's CI (see .github/workflows/ci.yml,
+# which only runs the test job). Copy this into .github/workflows/ ONLY if you
+# run your own self-hosted GitHub Actions runner ON the Orbit box and want
+# push-to-deploy. See deploy/advanced/README.md for the full setup.
+#
+# Placeholders to replace: <RUNNER_LABEL> (your runner's label),
+# <ORBIT_RUN_REPO> (the clean RUN checkout deploy.sh operates on).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: pytest (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --group dev
+      - run: uv run pytest -q
+
+  deploy:
+    name: zero-downtime deploy (self-hosted)
+    needs: test                  # THE GATE — needs implies success(): a red,
+                                 # cancelled or skipped test job blocks deploy.
+    # Keep this `if` free of always()/failure()/!cancelled() — those drop the
+    # implicit success() check and the gate would leak. push-to-main only, so
+    # fork PRs never reach the self-hosted runner.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: [self-hosted, <RUNNER_LABEL>]
+    # No actions/checkout — deploy.sh self-contains fetch + reset --hard on the
+    # clean RUN checkout, the blue-green flip, health checks and auto-rollback.
+    steps:
+      - name: Zero-downtime blue-green deploy
+        run: <ORBIT_RUN_REPO>/deploy/advanced/deploy.sh

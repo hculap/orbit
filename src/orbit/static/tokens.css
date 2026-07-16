@@ -1,0 +1,447 @@
+/* Personal Operational HUB — design tokens
+   Editorial-quiet, dark-first, Helvetica + JetBrains Mono, violet accent.
+
+   ─────────────────────────────────────────────────────────────────────────
+   DESIGN SYSTEM v2 (feature/design-system)
+   This file is the single source of truth for the visual language. Every
+   primitive in components.jsx / ds-*.jsx and every inline style should reach
+   for a token here rather than a literal. The v2 pass:
+     • fixed 6 tokens that were referenced but never defined (--fg-1, --danger,
+       --warning, --bg-2, --mono, --accent-dim) — they used to silently render
+       an inherited value or a hardcoded fallback.
+     • revived the dead type + spacing scales by adding the steps the codebase
+       actually reaches for (--t-2xs/md/code) + semantic spacing aliases.
+     • added the missing radius (--r-control:8 — the most common radius),
+       status soft/line/bg tints, control-heights, a z-index scale, scrims,
+       a richer shadow set, and motion tokens.
+   See docs/design-system/ for the full rationale + migration roadmap.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces — warm-cool neutral, slight cool tint */
+  --bg:        #0e0f12;          /* page */
+  --bg-2:      #14161a;          /* alias of surface-1 — was referenced undefined */
+  --surface-1: #14161a;          /* cards */
+  --surface-2: #1a1d22;          /* card hover, raised */
+  --surface-3: #22262d;          /* inputs, deeper */
+  --hairline:  rgba(255,255,255,0.06);
+  --hairline-strong: rgba(255,255,255,0.12);
+
+  /* Text */
+  --fg-1:      #f5f3ee;          /* emphasized titles — one notch brighter than --fg
+                                    (was referenced 32x but never defined) */
+  --fg:        #ebe9e4;          /* primary, slightly warm white */
+  --fg-2:      #b9b6ad;          /* secondary */
+  --fg-3:      #7d7a72;          /* tertiary, paths, meta */
+  --fg-4:      #4f4d47;          /* placeholder */
+
+  /* Accent — violet (oklch 0.72 0.18 295) */
+  --accent:        oklch(0.72 0.18 295);
+  --accent-soft:   oklch(0.72 0.18 295 / 0.16);
+  --accent-dim:    oklch(0.72 0.18 295 / 0.16);   /* alias of accent-soft — was undefined */
+  --accent-line:   oklch(0.72 0.18 295 / 0.35);
+  --accent-fg:     #0e0f12;
+
+  /* Status */
+  --ok:    oklch(0.78 0.14 155);
+  --warn:  oklch(0.82 0.14 80);
+  --err:   oklch(0.70 0.18 25);
+  --info:  oklch(0.78 0.10 240);
+
+  /* Status — semantic aliases (used with hardcoded fallbacks before) */
+  --danger:  oklch(0.70 0.18 25);   /* = --err */
+  --warning: oklch(0.82 0.14 80);   /* = --warn */
+
+  /* Status — soft fills + lines + bg (parallel to the accent family).
+     These replace ~80 copy-pasted inline oklch() status tints. */
+  --ok-soft:    oklch(0.78 0.14 155 / 0.16);
+  --ok-line:    oklch(0.78 0.14 155 / 0.35);
+  --warn-soft:  oklch(0.82 0.14 80 / 0.18);
+  --warn-line:  oklch(0.82 0.14 80 / 0.35);
+  --err-soft:   oklch(0.70 0.18 25 / 0.16);
+  --err-line:   oklch(0.70 0.18 25 / 0.35);
+  --err-bg:     oklch(0.30 0.10 25 / 0.18);
+  --info-soft:  oklch(0.78 0.10 240 / 0.16);
+  --info-line:  oklch(0.78 0.10 240 / 0.35);
+
+  /* Type */
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --mono: var(--font-mono);   /* short alias — was referenced undefined */
+
+  /* Spacing scale (4-based) — the raw ramp */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px;  --s-4: 16px;  --s-5: 20px;
+  --s-6: 24px; --s-7: 32px; --s-8: 40px;  --s-9: 56px;  --s-10: 72px;
+
+  /* Spacing — semantic aliases (what authors actually reach for; the raw scale
+     above was used 0x because nobody thinks in "s-7"). */
+  --page-pad:         28px;   /* desktop section side padding */
+  --page-pad-compact: 16px;   /* mobile section side padding */
+  --safe-bottom:      env(safe-area-inset-bottom, 0px);
+  --nav-clearance:    calc(72px + env(safe-area-inset-bottom, 0px) + 12px); /* mobile bottom-nav inset */
+  --card-gap:         12px;   /* gap inside a card */
+  --inter-card-gap:   14px;   /* gap between cards */
+  --field-gap:        6px;    /* gap between a label and its control */
+
+  /* Radii */
+  --r-sm: 6px;          /* smallest chips */
+  --r-control: 8px;     /* inputs / buttons / small controls / badges — the
+                           single most common radius (106x), previously a literal */
+  --r-md: 10px;         /* cards-in-cards, popovers */
+  --r-widget: 12px;     /* widget frames, file cards, log/terminal panes, banners */
+  --r-lg: 14px;         /* cards */
+  --r-sheet: 16px;      /* bottom-sheet top corners */
+  --r-xl: 20px;
+  --r-pill: 999px;      /* explicit alias for the 54x borderRadius:999 */
+
+  /* Control heights — kill the 28/32/34/36/38/42 drift */
+  --control-h:       38px;   /* canonical input / select / NumberField */
+  --control-h-sm:    36px;   /* segments, icon-picker cells */
+  --control-h-touch: 44px;   /* mobile tap-target minimum (WCAG) */
+
+  /* Layout widths */
+  --sidebar-width: 240px;
+  --drawer-width:  280px;
+  --panel-width:   280px;
+  --kanban-col:    280px;
+
+  /* Scrims (modal / sheet backdrops — were 0.5/0.55/0.6 for one concept) */
+  --scrim:       rgba(0,0,0,0.5);
+  --scrim-heavy: rgba(0,0,0,0.92);   /* lightbox */
+  --terminal-bg: #0e0f12;            /* mirror in JS as HUB_TERMINAL_BG for injected iframe CSS */
+
+  /* Shadows */
+  --shadow-1: 0 1px 2px rgba(0,0,0,0.4), 0 4px 12px rgba(0,0,0,0.25);
+  --shadow-2: 0 8px 32px rgba(0,0,0,0.45), 0 2px 6px rgba(0,0,0,0.35);
+  --shadow-sm:     0 1px 6px rgba(0,0,0,0.32);
+  --shadow-fab:    0 6px 18px rgba(0,0,0,0.32);
+  --shadow-pop:    0 12px 32px rgba(0,0,0,0.36);
+  --shadow-sheet:  0 -12px 32px rgba(0,0,0,0.36);   /* upward, for bottom sheets */
+  --shadow-accent: 0 3px 10px oklch(0.72 0.18 295 / 0.45);  /* featured tab glow */
+
+  /* Z-index scale — documented stack order (replaces scattered magic ints) */
+  --z-sticky:     5;
+  --z-dropdown:   30;
+  --z-overlay:    40;
+  --z-sheet:      50;
+  --z-drawer:     60;
+  --z-modal:      100;
+  --z-toast:      120;
+  --z-fullscreen: 200;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 150ms;
+  --dur-mid:  180ms;
+  --dur-slow: 220ms;
+  --ease-out:    cubic-bezier(.2,.7,.3,1);
+  --ease-spring: cubic-bezier(.2,.7,.2,1);
+
+  /* Type sizes — editorial calm */
+  --t-display: 40px;
+  --t-h1:      28px;
+  --t-h2:      20px;
+  --t-h3:      16px;
+  --t-body:    15px;
+  --t-md:      14px;   /* prose / row titles (172x of 13-14 had no clean token) */
+  --t-sm:      13px;
+  --t-cap:     12px;   /* captions / dense meta labels (273x of fontSize:12) */
+  --t-code:    12.5px; /* mono editor / textarea body */
+  --t-xs:      11px;
+  --t-2xs:     10px;   /* nav-group / badge / tab labels (96x of fontSize:10) */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     ORBIT COSMIC LAYER (v3) — the logo's visual language as design tokens.
+     The brand mark is a cosmic orbit: a blue→violet→magenta nebula gradient
+     with a glowing plasma core on near-black. v3 lifts that energy into the UI
+     as a coherent gradient + glow + orbital-motion system. Everything stays
+     dark-first: gradients are accents/edges/glows, never full-bleed fills that
+     would hurt legibility. All knobs live here so a single edit re-tunes the
+     whole app, and every effect degrades to the flat v2 look if unused.
+     ───────────────────────────────────────────────────────────────────────── */
+
+  /* The three nebula stops (blue → violet → magenta), oklch to match --accent */
+  --cosmic-blue:    oklch(0.68 0.17 262);   /* indigo-blue energy */
+  --cosmic-violet:  oklch(0.72 0.18 295);   /* == --accent, the core hue */
+  --cosmic-magenta: oklch(0.72 0.19 345);   /* warm plasma edge */
+  --cosmic-cyan:    oklch(0.86 0.13 210);   /* plasma-core highlight (sparingly) */
+  --cosmic-deep:    oklch(0.55 0.18 285);   /* deep-space violet for shadows */
+
+  /* Signature gradients */
+  --grad-cosmic:        linear-gradient(135deg, var(--cosmic-blue) 0%, var(--cosmic-violet) 50%, var(--cosmic-magenta) 100%);
+  --grad-cosmic-rev:    linear-gradient(135deg, var(--cosmic-magenta) 0%, var(--cosmic-violet) 50%, var(--cosmic-blue) 100%);
+  /* Wide variant (≈300% span) for animated shimmer of text/borders */
+  --grad-cosmic-wide:   linear-gradient(110deg,
+                          var(--cosmic-blue) 0%, var(--cosmic-violet) 22%, var(--cosmic-magenta) 42%,
+                          var(--cosmic-cyan) 55%, var(--cosmic-magenta) 68%, var(--cosmic-violet) 82%, var(--cosmic-blue) 100%);
+  /* Low-alpha tints for hairlines / soft fills */
+  --grad-cosmic-soft:   linear-gradient(135deg, oklch(0.68 0.17 262 / 0.18) 0%, oklch(0.72 0.18 295 / 0.16) 50%, oklch(0.72 0.19 345 / 0.18) 100%);
+  --grad-cosmic-line:   linear-gradient(135deg, oklch(0.68 0.17 262 / 0.45) 0%, oklch(0.72 0.18 295 / 0.5) 50%, oklch(0.72 0.19 345 / 0.45) 100%);
+  /* Radial plasma core (logo's glowing center) — for dots/avatars/glyphs */
+  --grad-core:          radial-gradient(circle at 38% 32%, var(--cosmic-cyan) 0%, var(--cosmic-violet) 38%, var(--cosmic-deep) 78%, oklch(0.40 0.16 290) 100%);
+  /* Large nebula wash for the app shell background. Dark-first but clearly
+     felt — blue top-left, magenta top-right, violet glow rising from the
+     bottom, echoing the logo's cosmic energy behind all content. */
+  --grad-nebula-bg:     radial-gradient(130% 85% at 82% -12%, oklch(0.62 0.20 345 / 0.16) 0%, transparent 56%),
+                        radial-gradient(110% 75% at -8% 4%, oklch(0.60 0.19 262 / 0.16) 0%, transparent 52%),
+                        radial-gradient(100% 95% at 50% 118%, oklch(0.60 0.19 295 / 0.13) 0%, transparent 62%);
+
+  /* Glows — the cosmic counterpart to the --shadow-* family */
+  --glow-accent:  0 0 0 1px oklch(0.72 0.18 295 / 0.4), 0 4px 22px oklch(0.66 0.2 300 / 0.35);
+  --glow-strong:  0 2px 10px oklch(0.66 0.2 300 / 0.45), 0 8px 34px oklch(0.62 0.2 320 / 0.40);
+  --glow-core:    0 0 14px oklch(0.78 0.18 300 / 0.7), 0 0 28px oklch(0.7 0.2 330 / 0.35);
+  --glow-soft:    0 2px 18px oklch(0.66 0.2 300 / 0.22);
+
+  /* Cosmic motion durations (slower, ambient — distinct from the snappy UI ones) */
+  --orbit-spin-slow: 18s;
+  --orbit-spin-mid:  9s;
+  --shimmer-dur:     6s;
+  --pulse-dur:       2.6s;
+}
+
+/* base reset */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* tiny utility classes used across components */
+.mono { font-family: var(--font-mono); font-feature-settings: "ss01","cv11"; }
+.muted { color: var(--fg-3); }
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+  color: var(--fg-2);
+}
+
+/* hide scrollbars but keep scrollable */
+.scroll-hide { scrollbar-width: none; }
+.scroll-hide::-webkit-scrollbar { display: none; }
+
+/* skeleton shimmer */
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+.skel {
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: 6px;
+}
+
+/* live dot pulse */
+@keyframes livepulse {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.78 0.14 155 / 0.6); }
+  50% { box-shadow: 0 0 0 6px oklch(0.78 0.14 155 / 0); }
+}
+.live-dot {
+  width: 8px; height: 8px; border-radius: 999px;
+  background: var(--ok);
+  animation: livepulse 2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+/* "agent is thinking" — a blinking accent dot on a session row + a gentle
+   opacity pulse on the agent tab, driven by /api/orchestrator/turns/running.
+   Opacity-based (not box-shadow) so the title row's overflow:hidden and the tab
+   strip's overflow can't clip the effect. */
+@keyframes hub-think-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+.hub-think-dot {
+  width: 8px; height: 8px; border-radius: 999px;
+  background: var(--accent); flex-shrink: 0; display: inline-block;
+  animation: hub-think-blink 1.1s ease-in-out infinite;
+}
+@keyframes hub-think-tab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.hub-think-tab { animation: hub-think-tab-pulse 1.6s ease-in-out infinite; }
+
+/* caret blink */
+@keyframes caret { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+.caret { display: inline-block; width: 8px; height: 1.05em; vertical-align: -2px; background: var(--accent); margin-left: 2px; animation: caret 1.1s steps(1) infinite; }
+
+/* fade in */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.fade-in { animation: fadeUp 0.28s ease-out both; }
+
+/* spin — shared by Spinner primitive (moved out of render-body inline <style>) */
+@keyframes hub-spin { to { transform: rotate(360deg); } }
+.hub-spin { animation: hub-spin 0.9s linear infinite; transform-origin: center; }
+
+/* thinking dots — shared keyframes (was injected per-render in 3 places) */
+@keyframes hub-thinking { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+/* focus ring */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button { font-family: inherit; }
+
+/* ── live-app overrides ──────────────────────────────────────
+   We're outside the design canvas now, so html/body/#root must
+   fill the viewport and the page background must win against any
+   stray UA defaults. */
+html, body { height: 100%; min-height: 100%; width: 100%; }
+body { background: var(--bg) !important; overflow: hidden; }
+/* The React mount node anchors absolutely-positioned children of
+   MobileHub/DesktopHub (drawer, bottom-nav, bottom sheets, modals).
+   It needs an explicit viewport-tied height because the previous
+   `height: 100%` cascade collapsed to 0 in some browsers when the
+   intrinsic parent height wasn't yet established. */
+#root {
+  position: relative;
+  height: 100vh;
+  height: 100dvh; /* shrinks for iOS URL bar */
+  min-height: 100vh;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Mobile viewport: tokens are responsive (rem/px-based with no
+   fixed canvas widths), so almost nothing needs tweaking below 960px.
+   The one exception is iOS Safari, which auto-zooms when a focused
+   form control has font-size < 16px. We bump form controls to 16px
+   ONLY inside the Settings view (scoped via .settings-root, !important
+   to beat the inline 13px the design-system inputs ship) so the rest
+   of the app keeps its compact inputs untouched. */
+@media (max-width: 960px) {
+  .settings-root input,
+  .settings-root select,
+  .settings-root textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* highlight.js — let our card carry the background; hljs only paints
+   token colours. Otherwise the github-dark stylesheet ships its own
+   #0d1117 background which clashes with our surface-2. */
+.md-render pre code.hljs,
+pre > code.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+.md-render pre {
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ORBIT COSMIC LAYER (v3) — keyframes + utility classes
+   Consumed by components.jsx / ds-*.jsx / app.jsx / the /design styleguide.
+   Pure additive: nothing here changes layout, only paint + motion.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Subtle nebula wash behind the whole shell. #root is transparent (body paints
+   --bg); the gradient sits behind #root's content, so it shows through gutters
+   and translucent surfaces without any stacking-context risk. */
+#root {
+  background-image: var(--grad-nebula-bg);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* ── keyframes ─────────────────────────────────────────────── */
+/* drift a gradient's background-position (text shimmer, aurora, gradient border) */
+@keyframes orbit-shimmer { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+/* the logo's plasma core breathing */
+@keyframes orbit-core-pulse {
+  0%, 100% { box-shadow: 0 0 12px oklch(0.78 0.18 300 / 0.6), 0 0 24px oklch(0.7 0.2 330 / 0.3); }
+  50%      { box-shadow: 0 0 22px oklch(0.84 0.18 300 / 0.9), 0 0 44px oklch(0.72 0.2 330 / 0.5); }
+}
+/* ambient glow breathing for featured surfaces */
+@keyframes orbit-glow-pulse {
+  0%, 100% { box-shadow: var(--glow-soft); }
+  50%      { box-shadow: var(--glow-accent); }
+}
+/* a satellite riding an orbit ring (splash + loaders) */
+@keyframes orbit-revolve { to { transform: rotate(360deg); } }
+/* slow nebula float for big decorative blobs */
+@keyframes orbit-float { 0%, 100% { transform: translate3d(0,0,0) scale(1); opacity: .9; } 50% { transform: translate3d(0,-2%,0) scale(1.04); opacity: 1; } }
+
+/* ── gradient text ─────────────────────────────────────────── */
+.orbit-gradient-text {
+  background-image: var(--grad-cosmic);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+.orbit-gradient-text.is-animated {
+  background-image: var(--grad-cosmic-wide);
+  background-size: 280% 100%;
+  animation: orbit-shimmer var(--shimmer-dur) ease-in-out infinite;
+}
+
+/* ── glows (box-shadow helpers; surfaces may also use the vars directly) ── */
+.orbit-glow        { box-shadow: var(--glow-accent); }
+.orbit-glow-strong { box-shadow: var(--glow-strong); }
+.orbit-glow-soft   { box-shadow: var(--glow-soft); }
+.orbit-glow-pulse  { animation: orbit-glow-pulse var(--pulse-dur) ease-in-out infinite; }
+
+/* ── gradient border (padding-box/border-box trick; pass --gb-bg to match the
+   surface the bordered element sits on; defaults to the card surface) ── */
+.orbit-gradient-border {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--gb-bg, var(--surface-1)), var(--gb-bg, var(--surface-1))) padding-box,
+    var(--grad-cosmic-line) border-box;
+}
+.orbit-gradient-border.is-animated {
+  background:
+    linear-gradient(var(--gb-bg, var(--surface-1)), var(--gb-bg, var(--surface-1))) padding-box,
+    var(--grad-cosmic-wide) border-box;
+  background-size: auto, 280% 100%;
+  animation: orbit-shimmer var(--shimmer-dur) ease-in-out infinite;
+}
+
+/* ── plasma core dot (maps 1:1 to the logo's glowing center; supersedes the
+   green .live-dot wherever a brand-coloured pulse is wanted) ── */
+.orbit-core {
+  border-radius: 999px;
+  background: var(--grad-core);
+  animation: orbit-core-pulse var(--pulse-dur) ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+/* ── cosmic button — the signature primary CTA ── */
+.cosmic-btn {
+  background-image: var(--grad-cosmic);
+  background-size: 160% 160%;
+  background-position: 0% 50%;
+  color: #fff;
+  border: 1px solid transparent;
+  box-shadow: var(--glow-soft);
+  transition: box-shadow var(--dur-mid) var(--ease-out),
+              background-position var(--dur-slow) var(--ease-out),
+              filter var(--dur-base) var(--ease-out),
+              transform var(--dur-base) var(--ease-out);
+}
+.cosmic-btn:hover    { box-shadow: var(--glow-strong); background-position: 100% 50%; filter: brightness(1.07) saturate(1.05); }
+.cosmic-btn:active   { transform: translateY(1px) scale(0.99); }
+
+/* ── aurora background (splash hero / featured strips) ── */
+.orbit-aurora-bg {
+  background-image: var(--grad-cosmic-wide);
+  background-size: 280% 280%;
+  animation: orbit-shimmer calc(var(--shimmer-dur) * 1.4) ease-in-out infinite;
+}
+
+/* ── orbital ring spin (decorative rings, loaders) ── */
+.orbit-ring-spin     { animation: orbit-revolve var(--orbit-spin-slow) linear infinite; transform-origin: center; }
+.orbit-ring-spin-mid { animation: orbit-revolve var(--orbit-spin-mid) linear infinite; transform-origin: center; }
+
+/* ── respect reduced-motion: keep the colour, drop the movement ── */
+@media (prefers-reduced-motion: reduce) {
+  .orbit-gradient-text.is-animated,
+  .orbit-gradient-border.is-animated,
+  .orbit-aurora-bg,
+  .orbit-glow-pulse,
+  .orbit-core,
+  .orbit-ring-spin,
+  .orbit-ring-spin-mid { animation: none !important; }
+  .orbit-gradient-text.is-animated { background-image: var(--grad-cosmic); background-size: auto; }
+}

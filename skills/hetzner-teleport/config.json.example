@@ -1,0 +1,4 @@
+{
+  "dashboard_url": "https://<your-dashboard>",
+  "artifact_token": "PASTE_TOKEN_FROM_SETTINGS_SERWER_TELEPORT"
+}

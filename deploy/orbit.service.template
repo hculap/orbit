@@ -1,0 +1,64 @@
+# Orbit systemd service (single-instance, simple deploy).
+#
+# This is a TEMPLATE: scripts/install.sh renders the ${...} placeholders from
+# the target box (`id`, $HOME, the checkout path) and installs the result to
+# /etc/systemd/system/orbit.service. Do not install this file verbatim.
+#
+# Placeholders:
+#   ${ORBIT_USER}  service account (defaults to the invoking user)
+#   ${ORBIT_GROUP} its primary group (resolved via `id -gn`)
+#   ${ORBIT_UID}   its numeric uid (for the per-user bus / XDG_RUNTIME_DIR)
+#   ${ORBIT_HOME}  its home dir
+#   ${ORBIT_REPO}  the Orbit checkout (WorkingDirectory)
+#   ${ORBIT_UV}    absolute path to the `uv` binary
+[Unit]
+Description=Orbit — self-hosted personal server dashboard
+After=network-online.target user@${ORBIT_UID}.service
+Wants=network-online.target
+# Ordered after the per-user manager so the user bus (/run/user/${ORBIT_UID}/bus)
+# is up before boot — the optional orchestrator terminal spawns its tmux server
+# into that manager's scope so sessions survive `systemctl restart`.
+Wants=user@${ORBIT_UID}.service
+
+[Service]
+Type=simple
+User=${ORBIT_USER}
+Group=${ORBIT_GROUP}
+WorkingDirectory=${ORBIT_REPO}
+ExecStart=${ORBIT_UV} run --directory ${ORBIT_REPO} python -m orbit --host 127.0.0.1 --port 8766
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# ── Optional orchestrator (Claude Code terminal) plumbing ────────────────
+# Harmless if you don't use the orchestrator. XDG_RUNTIME_DIR + linger let the
+# tmux server outlive restarts; TMUX_TMPDIR pins its socket off /tmp so a
+# PrivateTmp restart re-adopts the surviving server instead of orphaning it.
+Environment=CLAUDE_CONFIG_DIR=${ORBIT_HOME}/.claude
+Environment=XDG_RUNTIME_DIR=/run/user/${ORBIT_UID}
+Environment=TMUX_TMPDIR=${ORBIT_HOME}/.orchestrator/tmux
+# Point the app at your override.yaml (labels/icons/order + tasks/notify config).
+Environment=DASHBOARD_OVERRIDE=${ORBIT_REPO}/config/override.yaml
+# Load secrets (Telegram token, TTS keys, DASHBOARD_PUBLIC_URL, …) if you keep
+# an env file. Leading '-' = optional (no error if the file is absent).
+EnvironmentFile=-${ORBIT_HOME}/.env
+
+# ── Hardening (safe defaults) ────────────────────────────────────────────
+# ProtectHome=false is REQUIRED: Orbit discovers the PARA tree (~/Areas,
+# ~/Projects, ~/Resources) in the operator's home.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=${ORBIT_HOME}
+PrivateTmp=true
+#
+# OPT-IN operator parity — ONLY if you want the orchestrator agent to have the
+# same power as your interactive ssh shell (run `sudo`, edit /etc, manage
+# services). This removes real security boundaries; enable only on a
+# single-tenant box you fully trust and keep Tailscale-only / behind auth:
+#   NoNewPrivileges=false
+#   ProtectSystem=false
+
+[Install]
+WantedBy=multi-user.target

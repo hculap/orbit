@@ -1,0 +1,111 @@
+# config/override.yaml — optional overlay on top of filesystem discovery.
+# Copy to override.yaml (gitignored) and customize.
+
+# Reorder tabs (default: [areas, projects, apps, resources])
+# tab_order: [apps, projects, areas, resources]
+
+# Per-area customization (keys = directory names under ~/Areas/)
+areas:
+  Work:
+    icon: "💼"
+    description: "Example area — describe what lives here"
+  Health:
+    icon: "💪"
+
+# Per-project (key = project dir name under ~/Projects/)
+projects:
+  my-app:
+    icon: "🚀"
+    label: "My App"
+  my-site:
+    icon: "🌐"
+    label: "My Site"
+  # secret-internal:
+  #   hidden: true
+
+# Per-app (key = path under nginx — start with /)
+apps:
+  /my-app:
+    icon: "🚀"
+    label: "My App"
+
+# External apps — not proxied by nginx, open in new tab via explicit URL.
+# Useful for Tailscale-only services (Home Assistant, etc).
+external_apps:
+  - label: "My Service"
+    icon: "🏡"
+    url: "http://<host>.<tailnet>.ts.net:8123/"
+    description: "Example Tailscale-only service (MagicDNS URL)"
+
+# ── Terminal access (orchestrator kebab) ─────────────────────────
+# When set, the orchestrator chat panel exposes a "Copy terminal command"
+# kebab item that builds an `ssh <host> -t 'tmux -L hd-orch attach -t hd-<sid>'`
+# string for the active interactive session. The host must be reachable
+# via your local SSH config (alias or full user@host).
+terminal:
+  ssh_host: "<your-ssh-host>"
+
+# ── Inline interactive terminal (ttyd-backed) ────────────────────
+# Server-side flags live in ~/.orchestrator/settings.json (editable via
+# the Settings UI). Defaults shown here for reference only — they do NOT
+# come from this file; this block is documentation. Requires `ttyd` >=
+# 1.7.0 on the host (`brew install ttyd` / `apt install ttyd`).
+#
+#   ttyd_enabled:     false    # kill-switch — flag off = legacy SSE preview
+#   ttyd_idle_ttl_s:  900      # how long ttyd stays warm after last client
+#   ttyd_port_min:    7700     # localhost-only port range for per-session ttyds
+#   ttyd_port_max:    7799
+
+# ── Tasks feature ────────────────────────────────────────────────
+# GitHub-backed task backlog (Kanban + List in the Tasks tab, CRUD via
+# /api/tasks/*, due-date reminders fired via Telegram on a 60s cron tick).
+# Requires `gh` CLI authenticated with the `project` scope on this host.
+tasks:
+  # Flip to true to enable routes + reminder loop. Default off.
+  enabled: false
+  # Canonical GH Projects v2 board. Supports /users/<owner>/projects/<n>
+  # and /orgs/<owner>/projects/<n>. The dashboard auto-resolves the
+  # GraphQL node ID at runtime if `project_node_id` below is empty.
+  project_url: "https://github.com/users/<owner>/projects/<n>"
+  # Leave empty — the dashboard auto-resolves the GraphQL node ID from project_url at runtime.
+  project_node_id: ""
+  # New issues land here unless an area_repo_map / proj_repo_map entry matches.
+  default_repo: "<owner>/tasks"
+  # Per-area / per-project repo overrides. Keys are the area/project slug
+  # used in `area:<slug>` / `proj:<slug>` labels (lowercase, hyphenated).
+  area_repo_map:    {}
+  proj_repo_map:    {}
+  #   my-app: "<owner>/<repo>"
+  # Local time anchors. New `at_period` reminders pull from these; legacy
+  # `morning_of`/`exact` kinds still use their dedicated keys.
+  fire_times:
+    morning:   "09:00"
+    noon:      "12:00"
+    afternoon: "15:00"
+    evening:   "21:00"
+    # Legacy aliases (only matter if you still have pre-v2 reminders):
+    morning_of: "08:00"
+    exact:      "09:00"
+  # If the dashboard is down past a reminder fire-time, a reminder fires
+  # late as long as it's within the grace window; beyond that it's silently
+  # marked fired so a multi-hour outage doesn't dump a wall of pings.
+  grace_window_hours: 6
+  timezone: "Europe/Warsaw"  # set your IANA tz (example value)
+  # Auto-applied to any new task with a due date when the user doesn't
+  # configure reminders explicitly. Default = ping on the morning of due.
+  reminder_defaults:
+    - {kind: at_period, offset_days: 0, period: morning}
+
+# ── Issues feature (per-project/area GitHub issues) ──────────────
+# The per-repo Issues view (list / create / edit / comment / close-reopen) on a
+# project or area detail page ships UNCONDITIONALLY for any repo that has a
+# GitHub remote — these flags only gate the two cross-cutting extras. Both
+# default off (opt-in); flip false to roll back.
+issues:
+  # "Make task": promote a repo issue onto the global Tasks board (the button in
+  # the Issues detail pane + `gh-issues make-task <n>`). ALSO requires the
+  # `tasks:` block above to be configured (needs the gh `project` scope).
+  make_task: false
+  # One-click "Create GitHub repo" for a project/area that has no remote yet,
+  # so Issues can be enabled for it (git init + initial commit + gh repo create).
+  create_repo: false

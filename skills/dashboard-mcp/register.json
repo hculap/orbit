@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Drive THIS orbit with typed MCP tools (mcp__dashboard__*) instead of ad-hoc curl: search/list/find/create/start/stop the other PARA agent sessions, send-and-wait for replies, read transcripts, answer a child's AskUserQuestion / permission prompts by injecting keystrokes into its tmux pane, plus PARA discovery and Telegram notify. The orchestrator's delegate-and-collect loop. Scoped to the Global agent.",
+  "icon": "🔌",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

@@ -1,0 +1,42 @@
+[Unit]
+Description=orbit STANDBY holder (zero-downtime deploys, port 8866)
+After=network-online.target tailscaled.service user@YOUR_UID.service
+Wants=network-online.target
+Wants=user@YOUR_UID.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/srv/orbit
+# Transient green holder spun up by deploy/deploy.sh ONLY during a deploy: it
+# serves HTTP/terminals/turns on 8866 while nginx is flipped to it and the
+# canonical blue instance (8766) restarts onto new code. HD_STANDBY=1 makes the
+# app SKIP the cron scheduler + job seeds + prewarm so it never double-fires
+# cron alongside blue (the scheduler lives exclusively on blue). Shares the
+# -L hd-orch tmux socket (intended — the tmux server is external + shared).
+# Runs from the same ~/srv RUN checkout as blue.
+ExecStart=/usr/local/bin/uv run --directory /home/YOUR_USER/srv/orbit python -m orbit --host 127.0.0.1 --port 8866
+Environment=HD_STANDBY=1
+# Not Restart=on-failure: this unit is started/stopped explicitly by the deploy
+# script; it must NOT linger or auto-respawn after the deploy stops it.
+Restart=no
+# `systemctl stop` SIGTERMs uvicorn → exit 143 (128+SIGTERM). Treat that as
+# clean so the holder doesn't accumulate a 'failed' state after each deploy.
+SuccessExitStatus=143
+StandardOutput=journal
+StandardError=journal
+Environment=CLAUDE_CONFIG_DIR=/home/YOUR_USER/.claude
+Environment=XDG_RUNTIME_DIR=/run/user/YOUR_UID
+Environment=TMUX_TMPDIR=/home/YOUR_USER/.orchestrator/tmux
+# Same shared override.yaml as blue (gitignored, absent from the ~/srv clone).
+Environment=DASHBOARD_OVERRIDE=/home/YOUR_USER/Projects/orbit/config/override.yaml
+
+# Hardening (mirror blue) — operator parity: sudo + /etc writable (see blue unit).
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=/home/YOUR_USER
+PrivateTmp=true
+
+# No [Install]: never enabled at boot — purely deploy-driven.

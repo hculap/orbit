@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Teleport Claude Code sessions between this dashboard server and the local Claude — import (server→here, into the current project) or export (here→server, to a chosen agent). One command /hetzner-teleport, direction auto-detected. Issue #91.",
+  "icon": "🛸",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

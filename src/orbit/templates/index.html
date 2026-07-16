@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e0f12" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <!-- Standard equivalent of the apple-prefixed meta — silences the
+       Chrome console deprecation warning. iOS still reads the apple one. -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Orbit" />
+  <link rel="manifest" href="{{ url_for('static', path='/manifest.json') }}" />
+  <!-- Orbit favicon set: .ico (legacy), crisp SVG (modern), PNG fallbacks. -->
+  <link rel="icon" href="{{ url_for('static', path='/favicon.ico') }}" sizes="any" />
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}" />
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', path='/favicon-32.png') }}" />
+  <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', path='/favicon-16.png') }}" />
+  <link rel="apple-touch-icon" href="{{ url_for('static', path='/apple-touch-icon.png') }}" />
+  <title>Orbit · {{ data.system.hostname }}</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="{{ url_for('static', path='/tokens.css') }}" />
+
+  <style>
+    /* Initial value for the keyboard-aware viewport height variable that
+       the mobile shell consumes via `height: var(--vvh, 100dvh)`. Set
+       SYNCHRONOUSLY here so first-paint on browsers without dvh support
+       (Safari ≤14) doesn't see an unresolved fallback chain and collapse
+       to `height: auto`. The runtime sync in app.jsx (visualViewport
+       listener) overwrites this with the actual visualViewport height as
+       soon as MobileHub mounts. */
+    :root { --vvh: 100vh; }
+
+    /* ── Orbit boot splash ──────────────────────────────────────────────
+       Self-contained (hardcoded colours, own keyframes) so it animates on
+       first paint, before tokens.css/Babel/React finish. Lives as a <body>
+       sibling of #root so React mounting into #root doesn't tear it out;
+       app.jsx fades + removes it once mounted. Mirrors the logo: tilted
+       orbit rings + a satellite + a glowing plasma core. */
+    #orbit-splash {
+      position: fixed; inset: 0; z-index: 9999;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 28px;
+      background:
+        radial-gradient(120% 90% at 50% 32%, oklch(0.26 0.08 300 / 0.55) 0%, transparent 62%),
+        radial-gradient(90% 70% at 80% 8%, oklch(0.30 0.10 345 / 0.22) 0%, transparent 55%),
+        #0e0f12;
+      opacity: 1;
+      transition: opacity .55s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #orbit-splash.is-hiding { opacity: 0; pointer-events: none; }
+    .orbit-splash-stage { position: relative; width: 150px; height: 150px; }
+    .orbit-plane { position: absolute; inset: 0; transform-style: preserve-3d; }
+    .orbit-plane-a { transform: rotateX(64deg) rotateZ(-16deg); }
+    .orbit-plane-b { transform: rotateX(60deg) rotateZ(58deg); }
+    .orbit-ring {
+      position: absolute; inset: 6px; border-radius: 50%;
+      background: conic-gradient(from 0deg,
+        transparent 0deg, oklch(0.68 0.17 262) 70deg, oklch(0.72 0.18 295) 160deg,
+        oklch(0.72 0.19 345) 250deg, transparent 332deg);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+              mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+      filter: drop-shadow(0 0 6px oklch(0.70 0.20 320 / 0.55));
+    }
+    .orbit-plane-a .orbit-ring { animation: orbit-boot-spin 2.6s linear infinite; }
+    .orbit-plane-b .orbit-ring { inset: 22px; animation: orbit-boot-spin 3.6s linear infinite reverse; }
+    .orbit-sat-wrap { position: absolute; inset: 6px; animation: orbit-boot-spin 2.6s linear infinite; }
+    .orbit-sat {
+      position: absolute; top: -4px; left: 50%; width: 9px; height: 9px; margin-left: -4.5px;
+      border-radius: 50%; background: oklch(0.92 0.09 320);
+      box-shadow: 0 0 10px oklch(0.82 0.18 330 / 0.95), 0 0 18px oklch(0.78 0.18 345 / 0.5);
+    }
+    .orbit-core-dot {
+      position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 38% 32%,
+        oklch(0.90 0.12 210) 0%, oklch(0.74 0.18 300) 40%, oklch(0.55 0.18 285) 78%, oklch(0.40 0.16 290) 100%);
+      animation: orbit-boot-pulse 2.4s ease-in-out infinite;
+    }
+    .orbit-splash-word {
+      font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+      font-size: 27px; font-weight: 700; letter-spacing: -0.015em;
+      background-image: linear-gradient(110deg, oklch(0.70 0.17 262), oklch(0.74 0.18 298) 46%, oklch(0.74 0.19 345));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+    .orbit-splash-bar { width: 138px; height: 3px; border-radius: 999px; background: oklch(0.32 0.05 290 / 0.35); overflow: hidden; }
+    .orbit-splash-bar > span {
+      display: block; width: 38%; height: 100%; border-radius: 999px;
+      background: linear-gradient(90deg, transparent, oklch(0.72 0.18 298), oklch(0.74 0.19 345), transparent);
+      animation: orbit-boot-load 1.25s ease-in-out infinite;
+    }
+    @keyframes orbit-boot-spin { to { transform: rotate(360deg); } }
+    @keyframes orbit-boot-pulse {
+      0%, 100% { box-shadow: 0 0 14px oklch(0.78 0.18 300 / 0.6), 0 0 28px oklch(0.70 0.20 330 / 0.30); }
+      50%      { box-shadow: 0 0 26px oklch(0.86 0.18 300 / 0.92), 0 0 50px oklch(0.72 0.20 330 / 0.5); }
+    }
+    @keyframes orbit-boot-load { 0% { transform: translateX(-130%); } 100% { transform: translateX(360%); } }
+    @media (prefers-reduced-motion: reduce) {
+      .orbit-plane-a .orbit-ring, .orbit-plane-b .orbit-ring, .orbit-sat-wrap,
+      .orbit-core-dot, .orbit-splash-bar > span { animation: none; }
+    }
+  </style>
+
+  <script>
+    // FastAPI's root_path (e.g. "" or "/dashboard") so fetch() works under any nginx subpath.
+    window.HUB_BASE_PATH = {{ (request.scope.get('root_path') or '') | tojson }};
+    // Initial data — pre-rendered by FastAPI for first paint without flicker.
+    window.HUB_INITIAL_DATA = {{ data | tojson }};
+  </script>
+
+  <!-- Markdown renderer + sanitizer for Sync file previews. DOMPurify is
+       required because Sync files come from any Syncthing peer and are not
+       inherently trusted. -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+
+  <!-- Syntax highlighting for orchestrator code blocks + markdown fenced code.
+       The /npm/highlight.js@11/lib/ paths point at CommonJS sources and throw
+       "module is not defined" / duplicate-identifier in the browser. The
+       browser-ready UMD bundles live in the official `cdn-release` GitHub
+       mirror under /build/. ~28 KB gzipped total. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/python.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/javascript.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/json.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/yaml.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/ini.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/nginx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/dockerfile.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/typescript.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/diff.min.js"></script>
+  <script>
+    // Register aliases the system prompt uses but that hljs doesn't ship out of the box.
+    if (window.hljs) {
+      try { hljs.registerAliases(['toml'], { languageName: 'ini' }); } catch (e) {}
+      try { hljs.registerAliases(['systemd'], { languageName: 'ini' }); } catch (e) {}
+      try { hljs.registerAliases(['sh'], { languageName: 'bash' }); } catch (e) {}
+    }
+  </script>
+
+  <!-- Chart.js 4.x — for chart widget blocks. ~70KB gz. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+
+  <!-- Leaflet 1.9.4 — map widget tiles + markers + polylines.
+       CSS MUST load before the map mounts, otherwise tile sizes calculate wrong. -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <!-- React 18 + Babel-standalone (no build step) -->
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+  <!-- MiniSearch — fuzzy / token-AND search across session corpora (~7KB gz, exposes window.MiniSearch). -->
+  <script src="https://cdn.jsdelivr.net/npm/minisearch@7.1.2/dist/umd/index.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Orbit boot splash — animated orbital system + wordmark + loader.
+       Sibling of #root (not a child) so React mounting into #root leaves it
+       intact; app.jsx adds .is-hiding then removes it after the fade. -->
+  <div id="orbit-splash" aria-hidden="true" role="presentation">
+    <div class="orbit-splash-stage">
+      <div class="orbit-plane orbit-plane-a">
+        <div class="orbit-ring"></div>
+        <div class="orbit-sat-wrap"><span class="orbit-sat"></span></div>
+      </div>
+      <div class="orbit-plane orbit-plane-b">
+        <div class="orbit-ring"></div>
+      </div>
+      <div class="orbit-core-dot"></div>
+    </div>
+    <div class="orbit-splash-word">Orbit</div>
+    <div class="orbit-splash-bar"><span></span></div>
+  </div>
+
+  <!-- Service worker for orchestrator push notifications is registered
+       programmatically by app.jsx (navigator.serviceWorker.register) — no
+       declarative <link rel="serviceworker"> tag (that proposal is dead).
+       The SW lives at /static/sw.js with scope /static/; push subscriptions
+       are tied to the registration regardless of scope, so notifications
+       work even though the SW doesn't intercept page fetches. -->
+
+  <!-- Load order: router (URL hook used by app.jsx) → components → audio-bus (cross-subsystem audio mutex; must precede media-player-engine + orchestrator-tts + orchestrator-conversation) → file-preview, logs-view (siblings of sections) → sections → orchestrator-notifications (used by settings-view) → orchestrator-tts (used by settings-view + orchestrator) → orchestrator-shortcuts (HubShortcuts store/helpers for the terminal shortcut editor; used by settings-* + orchestrator-terminal-preview) → settings-primitives (useSettings/useServerSettings + window.HubSettings UI atoms — the settings contract, must load before every settings-* module) → settings-notifications / settings-voice / settings-chat (Czat tab: display prefs + Prompty) / settings-server (per-tab modules) → settings-shortcuts-editor (shortcuts drawer, used by settings-terminal) → settings-terminal → settings-view (tabbed shell; consumes the tab modules — loads last, still publishes window.SettingsView + window.useSettings) → orchestrator-blocks → orchestrator-widgets (sibling of orchestrator-blocks; provides agent-emitted widget renderers used by BlockRenderer) → orchestrator-voice → orchestrator-mic-button → orchestrator-attachments → orchestrator-artifacts (artifact gallery + viewer modal + persistent events channel; reuses widget renderers, used by orchestrator + library-agent-panel) → orchestrator-message-actions (used by transcript) → orchestrator-transcript → orchestrator-stream → orchestrator-unread → orchestrator-pin-popover (used by orchestrator) → orchestrator-state-modals (used by orchestrator) → orchestrator-model-modal (used by orchestrator) → orchestrator-scroll-fab (used by orchestrator) → orchestrator-aec-loopback (used by orchestrator-conversation) → orchestrator-conversation (used by orchestrator) → orchestrator → library-file-tree → library-link-picker → library-md-editor (Phase 2 markdown editor used by library-detail) → library-github-panels (Phase 3 PR/Issue panels used by library-detail) → library-create-modal → library-overview-extras (LinkedItemsPanel / OverviewGitPanel / RecentCommitsPanel mounted by overview-panels) → library-overview-panels (Overview tab body + Gitignore tab + inline file panels, used by library-detail) → library-branch-panel (Branches tab body, mounted by library-detail) → library-agent-panel (Agent tab body, mounted by library-detail; reads window.SessionList from orchestrator.jsx) → library-detail (Phase 2/3 Areas/Projects CRUD; loaded before details.jsx so DetailRouter sees window.LibraryDetail) → details → agents-directory (publishes window.AgentsDirectoryView consumed by app.getSection) → app (mounts) -->
+  <!-- hub-clipboard: shared copyText() with iOS-Safari/PWA execCommand fallback
+       (window.HubClipboard); plain <script> (not babel) so node --test can
+       require it. Zero deps → load earliest; MUST precede every copy consumer
+       (orchestrator-blocks, secrets-components, details, design-system,
+       orchestrator, orchestrator-terminal-preview). -->
+  <script src="{{ url_for('static', path='/hub-clipboard.js') }}"></script>
+  <!-- share-route: pure /share URL encode/decode helpers (window.HubShareRoute);
+       plain <script> (not babel) so router.jsx + node --test can both use it.
+       MUST load before router.jsx, which calls window.HubShareRoute. -->
+  <script src="{{ url_for('static', path='/share-route.js') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/router.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/components.jsx') }}"></script>
+  <!-- Design system v2 (feature/design-system): the reusable primitive library.
+       MUST load immediately after components.jsx (uses window.Icon/Button/Modal)
+       and BEFORE settings-primitives.jsx + every consumer, so window.* primitives
+       (Input/Textarea/Select/Segmented/Tabs/Badge/Popover/StatusBanner/Field/
+       ListRow/EmptyState/Stack/Inline/PageScaffold/Avatar/ConfirmModal/…) are
+       present everywhere. No bundler — order is the contract. -->
+  <script type="text/babel" src="{{ url_for('static', path='/ds-layout.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/ds-forms.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/ds-overlays.jsx') }}"></script>
+  <!-- audio-bus (cross-subsystem audio mutex; must precede media-player-engine
+       + orchestrator-tts + orchestrator-conversation). Plain JS (not Babel) —
+       JSX-free singleton publishing window.HubAudioBus so the three audio
+       subsystems hand off the audible channel instead of overlapping. -->
+  <script src="{{ url_for('static', path='/audio-bus.js') }}"></script>
+  <!-- Media player: persistent audio/video engine (MediaPlayerProvider wraps
+       ResponsiveHub in app.jsx) → shared transport atoms → the bottom dock.
+       Engine must precede orchestrator-artifacts.jsx (Play handlers call
+       window.HubPlayer) and app.jsx (uses MediaPlayerProvider/MediaDock). -->
+  <script type="text/babel" src="{{ url_for('static', path='/media-player-engine.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/media-controls.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/media-queue.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/media-dock.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/file-preview.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/logs-view.jsx') }}"></script>
+  <script src="{{ url_for('static', path='/projects-group.js') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/sections.jsx') }}"></script>
+  <!-- System drill-down modal (#104): clickable CPU/RAM/Swap/Disk cards →
+       per-process attribution. Needs window.Modal/ProgressBar/IconButton/Icon/
+       apiUrl (components.jsx) + bytesShort (sections.jsx, just above); consumed
+       by SystemView only at render time. -->
+  <script type="text/babel" src="{{ url_for('static', path='/system-drilldown.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-notifications.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-tts.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-shortcuts.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-primitives.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-notifications.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-voice.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-chat.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-server.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-shortcuts-editor.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-terminal.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/settings-view.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-blocks.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-widgets.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-voice.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-mic-button.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-attachments.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-artifacts.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-read-aloud.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-voice-prompts.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-message-actions.jsx') }}"></script>
+  <!-- mobile "Pokaż ostatnią wiadomość" modal — needs window.safeMd (orchestrator-blocks)
+       + window.Modal/BottomSheet (components), both loaded above; used by orchestrator.jsx -->
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-last-message-modal.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-transcript.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-stream.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-unread.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-pin-popover.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-state-modals.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-model-modal.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-terminal-preview.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-scroll-fab.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-aec-loopback.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-conversation.jsx') }}"></script>
+  <!-- Active-agents tab strip + ⌘←/→ agent-cycle logic. Pure (non-Babel) JS
+       publishing window.HubAgentTabs; must load BEFORE orchestrator.jsx, which
+       groups the warm pool into per-agent tabs + the keyboard cycle target. -->
+  <script src="{{ url_for('static', path='/agent-tabs-order.js') }}"></script>
+  <!-- session-list-order: JSX-free sort/fold logic for the session sidebar
+       (window.HubSessionListOrder). Plain <script> so node --test can require()
+       it; MUST load before orchestrator.jsx (SessionList consumes it). -->
+  <script src="{{ url_for('static', path='/session-list-order.js') }}"></script>
+  <!-- orchestrator-agent-tabs: enhanced agent-tab strip (window.AgentTabs) —
+       context menu, DnD reorder, hover-sessions flyout, "+" add-agent modal.
+       MUST load before orchestrator.jsx (which resolves window.AgentTabs). -->
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-agent-tabs.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-file-tree.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-link-picker.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-md-editor.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-github-panels.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-create-modal.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-overview-extras.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-overview-panels.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-branch-panel.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-agent-panel.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-detail.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/global-detail.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/details.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/agents-directory.jsx') }}"></script>
+  <!-- Skills register: install modal must load before the directory (which
+       references window.SkillsInstallModal). The detail view is independent
+       but loaded in the same group for proximity. -->
+  <script type="text/babel" src="{{ url_for('static', path='/skills-install-modal.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/skills-directory.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/skills-detail.jsx') }}"></script>
+  <!-- Scheduler register: next-fires-preview is consumed by both the create
+       modal and the detail Trigger tab, so it loads first. The create modal
+       must precede the directory (which references window.SchedulerCreateModal). -->
+  <script type="text/babel" src="{{ url_for('static', path='/next-fires-preview.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/scheduler-create-modal-trigger.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/scheduler-create-modal.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/scheduler-directory.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/scheduler-detail-runs.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/scheduler-detail.jsx') }}"></script>
+  <!-- Secrets register: secrets-components publishes shared primitives to
+       window (MaskedValue, EntryList, captcha modals, …) — must load BEFORE
+       both the top-level /secrets page and the per-scope panel that reuse
+       them via window.* handles. -->
+  <script type="text/babel" src="{{ url_for('static', path='/secrets-components.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/secrets-view.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/library-secrets-panel.jsx') }}"></script>
+  <!-- Tasks register: publishes window.TasksView consumed by app.getSection.
+       Must load before app.jsx; depends on window.Modal from components.jsx,
+       and on global `marked` + `DOMPurify` for body markdown rendering. -->
+  <script type="text/babel" src="{{ url_for('static', path='/tasks.jsx') }}"></script>
+  <!-- Desktop ⌘+⇧ session switcher. The pure logic is a plain (non-Babel) JS
+       module publishing window.HubSessionOrder; the .jsx overlay publishes
+       window.SessionSwitcher (depends on window.Modal + HubSessionOrder). Both
+       must load before app.jsx, which mounts <SessionSwitcher/> in DesktopHub. -->
+  <script src="{{ url_for('static', path='/session-switcher-order.js') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/session-switcher.jsx') }}"></script>
+  <!-- Living design-system styleguide at /design (window.DesignSystemView).
+       Loads last so every primitive + window.HubSettings is available; it renders
+       the real components as a runtime smoke test of the library. -->
+  <script type="text/babel" src="{{ url_for('static', path='/design-system.jsx') }}"></script>
+  <script type="text/babel" src="{{ url_for('static', path='/app.jsx') }}"></script>
+</body>
+</html>

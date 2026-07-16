@@ -26,21 +26,22 @@ Orbit is the front door to a Linux box you own. It auto-discovers a [PARA](https
 The fastest way to run Orbit is to **not install it yourself**. Paste the prompt below into **[Claude Code](https://www.anthropic.com/claude-code)** or **[Codex](https://openai.com/codex/)** and let the agent do it. It fetches Orbit's install skill from GitHub and runs it as an **interactive wizard** — it asks you the config questions, installs only what's needed, and stands the service up for you.
 
 ```text
-Set up Orbit for me on <a new Hetzner VPS | this machine | this VPS over SSH>.
-Read and follow the install guide at
+Set up Orbit for me. Read and follow the install guide at
 https://raw.githubusercontent.com/hculap/orbit/main/skills/orbit-install/SKILL.md
-— it's an interactive wizard: ask me the config questions (deploy target,
-access mode, which features), install what's needed, and stand up the service.
-Ask me before anything that costs money or opens a network port.
+— it's an interactive wizard. Ask me where to run it (this machine, an existing
+server over SSH, or a new cloud VM on whatever provider I use), how to reach it
+(a VPN like Tailscale, or public behind auth), and which features I want; then
+install what's needed and stand it up. Ask me before anything that costs money,
+opens a network port, or writes a secret.
 ```
 
 What it does:
 
 - **Works with Claude Code or Codex.** Either agent reads the skill straight from GitHub and follows it step by step.
-- **Acts as a wizard / configurator.** It interviews you first — deploy target, access mode, which features to enable — instead of assuming defaults.
-- **Deploys wherever you point it.** A brand-new Hetzner (or any) VPS, the machine you're on, or a remote box over SSH.
-- **Picks your access model.** Tailscale-only (recommended) or public + auth — your call.
-- **Asks before spending or exposing.** Nothing that costs money or opens a network port happens without your OK.
+- **Acts as a wizard / configurator.** It interviews you first — where to run it, how to reach it, which features — instead of assuming your setup.
+- **Deploys wherever you point it.** The machine you're on, an existing server over SSH, or a freshly provisioned cloud VM — Hetzner, AWS, DigitalOcean, GCP, a Pi, whatever you use.
+- **Your access model, your call.** A mesh VPN (e.g. Tailscale), another private path, or public behind TLS + auth.
+- **Asks before spending or exposing.** Nothing that costs money, opens a network port, or writes a secret happens without your OK.
 
 ## Manual install
 

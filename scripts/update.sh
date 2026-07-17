@@ -22,12 +22,16 @@ cd "$ORBIT_REPO"
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$ORBIT_REPO is not a git checkout"
-BRANCH="${REF:-$(git symbolic-ref --quiet --short HEAD || echo main)}"
+REFNAME="${REF:-$(git symbolic-ref --quiet --short HEAD || echo main)}"
 
-log "fetching origin…"
-git fetch --quiet origin "$BRANCH"
+log "fetching origin ($REFNAME)…"
+# Fetch the target ref by name — works for a branch OR a release tag — and
+# resolve it via FETCH_HEAD (tags are NOT under refs/remotes/origin/, so
+# `origin/<tag>` would not resolve). --tags keeps local tags in sync too.
+git fetch --quiet --tags origin "$REFNAME"
 PREV="$(git rev-parse HEAD)"
-TARGET="$(git rev-parse "origin/$BRANCH")"
+TARGET="$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}')" \
+  || die "could not resolve '$REFNAME' on origin (branch or tag?)"
 
 if [ "$PREV" = "$TARGET" ]; then
   log "already up to date ($(git rev-parse --short HEAD)) — nothing to do"

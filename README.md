@@ -62,11 +62,22 @@ For a real deployment, put it behind **nginx** and run it as a **systemd** servi
 
 ## Updating
 
-Pull the latest and restart in one step with [`scripts/update.sh`](scripts/update.sh) — it runs `git pull`, re-syncs dependencies with `uv sync`, restarts the service, and health-checks that it came back up.
+Orbit ships **tagged releases** — track those, not bleeding-edge `main`.
+[`scripts/update.sh`](scripts/update.sh) does the whole update in one step: fetch,
+`uv sync`, restart, health-check, and **auto-rollback** if the new version won't
+come up healthy.
 
 ```bash
-scripts/update.sh
+cd ~/orbit
+scripts/update.sh --ref v0.1.0          # update to a specific release
+# …or to the newest release tag:
+git fetch --tags origin && scripts/update.sh --ref "$(git tag -l 'v*' | sort -V | tail -1)"
 ```
+
+Or just tell your agent **"update Orbit"** and it runs this for you. Watch the
+[Releases](https://github.com/hculap/orbit/releases) page (or ⭐/Watch the repo)
+to know when a new version lands. Tracking `main` (`scripts/update.sh` with no
+`--ref`) also works, but gives you every in-progress commit.
 
 ## Configuration
 

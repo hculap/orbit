@@ -28,12 +28,9 @@ The fastest way to run Orbit is to **not install it yourself**. Paste the prompt
 ```text
 Set up Orbit for me. Read and follow the install guide at
 https://raw.githubusercontent.com/hculap/orbit/main/skills/orbit-install/SKILL.md
-— it's an interactive wizard. Ask me where to run it (this machine, an existing
-server over SSH, or a new cloud VM on whatever provider I use), how to reach it
-(a VPN like Tailscale, or public behind auth), and which features I want; then
-install what's needed and stand it up. Ask me before anything that costs money,
-opens a network port, or writes a secret.
 ```
+
+The guide is a self-contained wizard — the agent interviews you (where to run it, how to reach it, which features), installs what's needed, and asks before anything that costs money, opens a port, or writes a secret.
 
 What it does:
 

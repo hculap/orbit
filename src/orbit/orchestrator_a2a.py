@@ -1,9 +1,13 @@
 """Agent-to-agent (A2A) message bus — per-agent maildirs + JSON envelopes.
 
-Each Claude Code agent runs its OWN inbox listener (via the Claude Code
-``Monitor`` tool); the dashboard is a SUPERVISOR/ROUTER that drops envelopes
-into per-agent maildirs and, for an offline target, spawns its session so the
-new mail gets drained (auto-revive). No tmux pane injection of message bodies.
+**v2 is a PURE ENQUEUE store-and-forward maildir.** ``send`` writes the
+envelope into the target agent's ``inbox/`` and returns ``delivery=enqueued``.
+That is the whole delivery story: there is NO inbox listener/watcher, NO
+auto-revive of a cold target, NO push, NO notification — nothing wakes the
+recipient. Mail sits in the maildir until a HUMAN opens that agent and it runs
+``a2a inbox --drain``; the hourly GC tick (:mod:`orchestrator_a2a_gc`) drops
+never-drained mail after 7 days. The Monitor-armed watcher and the cold-revive
+kicker of v1 were removed in 2d2b208 — do not document them back.
 Same-host only; loop/cost is best-effort (no hard guardrails).
 
 This module is the dashboard-side writer/reader + maildir resolver — the

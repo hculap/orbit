@@ -118,6 +118,26 @@ class SessionEventHub:
             self._subscribers.pop(session_id, None)
             self._buffers.pop(session_id, None)
 
+    # ── read accessors ────────────────────────────────────────────
+
+    def subscriber_count(self, session_id: str) -> int:
+        """How many live EventSources this session has. Pure read.
+
+        Turns "is anyone actually looking at this?" into a sub-millisecond
+        answer — the geolocation round trip uses it to fast-fail instead of
+        blocking an agent for the full request TTL against an empty room.
+        """
+        return len(self._subscribers.get(session_id, ()))
+
+    def live_session_ids(self) -> list[str]:
+        """Sessions with at least one subscriber right now. Pure read.
+
+        ``unsubscribe`` drops the list once the last subscriber leaves, so an
+        empty entry can't linger — but the filter is kept explicit so a future
+        change to that cleanup can't silently start reporting dead sessions.
+        """
+        return [sid for sid, subs in self._subscribers.items() if subs]
+
     # ── lifecycle ─────────────────────────────────────────────────
 
     def start(self) -> None:

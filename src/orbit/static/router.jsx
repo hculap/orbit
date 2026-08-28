@@ -6,7 +6,7 @@
 //
 // Public surface:
 //   useRouter()                    → { path, push, replace, route }
-//   parseRoute(path)               → { section, detail?, tab?, sessionId? }
+//   parseRoute(path)               → { section, detail?, tab?, sessionId?, overlay? }
 //   buildPath({section, ...})      → string (relative, no BASE_PATH)
 //   addBase(p) / stripBase(p)      → BASE_PATH-aware
 //
@@ -121,16 +121,20 @@ function parseRoute(rawPath) {
     return { section: 'scheduler', jobId: decodeURIComponent(parts[1]), raw: path };
   }
 
-  // Orchestrator: optional session id segment.
-  if ((head === 'chat' || head === 'orchestrator') && parts.length >= 2) {
+  // Orchestrator: optional session id segment + optional overlay suffix
+  // (/chat/<sid>/gallery|issues — the artifact gallery / Issues modals that
+  // layer OVER the live session). Both are delegated to the JSX-free
+  // HubChatRoute helper (loaded as a plain <script> before this module), which
+  // also owns the reserved-word guard: without it `/chat/gallery` would parse
+  // as sessionId='gallery' and fire hub:open-session with a garbage id.
+  if (head === 'chat' || head === 'orchestrator') {
     // Both /chat/<sid> and /orchestrator/<sid> normalise to the same
     // section so existing checks (`section === 'orchestrator'`) keep
-    // working without a mass rename.
-    return { section: 'orchestrator', sessionId: parts[1], raw: path };
-  }
-  if (head === 'chat') {
-    // Bare /chat is the global agent's home — same as bare /orchestrator.
-    return { section: 'orchestrator', raw: path };
+    // working without a mass rename. Bare /chat is the global agent's home.
+    const ct = (typeof window !== 'undefined' && window.HubChatRoute)
+      ? window.HubChatRoute.parseChatTail(parts.slice(1))
+      : { sessionId: parts[1] };
+    return { section: 'orchestrator', sessionId: ct.sessionId, overlay: ct.overlay, raw: path };
   }
 
   // /share/<dir>/f/<file> — the Sync browser encodes its current folder +
@@ -150,12 +154,17 @@ function parseRoute(rawPath) {
 
 function buildPath(spec) {
   if (!spec) return '/';
-  const { section, detail, tab, sessionId, skillName, jobId } = spec;
+  const { section, detail, tab, sessionId, skillName, jobId, overlay } = spec;
   if (!section) return '/';
   // Always emit /chat (the new pretty form). /orchestrator parses the same
-  // way so old links still work, but new pushes use /chat.
-  if (section === 'orchestrator' && sessionId) return `/chat/${sessionId}`;
-  if (section === 'orchestrator') return '/chat';
+  // way so old links still work, but new pushes use /chat. HubChatRoute owns
+  // the `<sid>/<overlay>` tail and drops an unknown overlay value, so a bad
+  // one can never reach the address bar.
+  if (section === 'orchestrator') {
+    return '/chat' + ((typeof window !== 'undefined' && window.HubChatRoute)
+      ? window.HubChatRoute.buildChatTail({ sessionId, overlay })
+      : (sessionId ? `/${sessionId}` : ''));
+  }
   if (section === 'skills' && skillName) return `/skills/${encodeURIComponent(skillName)}`;
   if (section === 'scheduler' && jobId) return `/scheduler/${encodeURIComponent(jobId)}`;
   if ((section === 'areas' || section === 'projects' || section === 'resources') && detail) {
@@ -191,7 +200,15 @@ function _readLastPath() {
 function _writeLastPath(path) {
   try {
     if (!path || path === '/') return;
-    localStorage.setItem(_LAST_PATH_KEY, JSON.stringify({ path, ts: Date.now() }));
+    // Never remember a chat OVERLAY (/chat/<sid>/gallery|issues). The PWA
+    // cold-start restore replaceStates into lastPath, so an overlay there
+    // would reopen the modal with NO history entry behind it — Back would
+    // exit the app instead of closing it. Restore the session, not the modal.
+    const clean = (typeof window !== 'undefined' && window.HubChatRoute)
+      ? window.HubChatRoute.stripChatOverlay(path)
+      : path;
+    if (!clean || clean === '/') return;
+    localStorage.setItem(_LAST_PATH_KEY, JSON.stringify({ path: clean, ts: Date.now() }));
   } catch (_) { /* ignore quota / private mode */ }
 }
 
@@ -212,23 +229,35 @@ function useRouter() {
     };
   }, []);
 
-  const push = _routerUseCallback((next) => {
+  // Optional `state` is stored on the history ENTRY (History API state, not
+  // React state). Callers use it to record something about the entry that must
+  // survive a reload and a Back→Forward round trip — a React ref cannot, it
+  // dies with the page and is not restored when the user walks forward into an
+  // entry again. Today's only user is the chat overlay ({hubOverlay:true}, see
+  // orchestrator.jsx): "did WE push this entry?" decides whether closing the
+  // modal consumes the entry with back() or rewrites it with replace().
+  const push = _routerUseCallback((next, state) => {
     if (!next) return;
     if (next === path) return;
-    try { window.history.pushState(null, '', addBase(next)); } catch (_) { /* ignore */ }
+    try { window.history.pushState(state || null, '', addBase(next)); } catch (_) { /* ignore */ }
     setPath(next);
     window.dispatchEvent(new Event('router:change'));
     _writeLastPath(next);
   }, [path]);
 
-  const replace = _routerUseCallback((next) => {
+  // `replace` rewrites the CURRENT entry, so it PRESERVES that entry's state by
+  // default (pass an explicit `state` — or `null` — to overwrite it). Nulling
+  // it implicitly would erase the marker above on any unrelated in-place URL
+  // sync, e.g. onSelectSession reflecting the active session after a reload.
+  const replace = _routerUseCallback((next, state) => {
     if (!next) return;
     if (next === path) {
       // Even if path didn't change, a fresh write keeps the lastPath ts current.
       _writeLastPath(next);
       return;
     }
-    try { window.history.replaceState(null, '', addBase(next)); } catch (_) { /* ignore */ }
+    const nextState = state === undefined ? (window.history.state || null) : (state || null);
+    try { window.history.replaceState(nextState, '', addBase(next)); } catch (_) { /* ignore */ }
     setPath(next);
     window.dispatchEvent(new Event('router:change'));
     _writeLastPath(next);
@@ -264,9 +293,14 @@ function useColdStartRedirect(replace, currentPath) {
 // Live `useRouter()` instances won't see the change in their React state
 // until the next popstate, which is harmless because they re-parse from
 // `window.location` on every pop and only push/replace from user actions.
-function routerReplace(next) {
+// Preserves the current entry's History state for the same reason
+// useRouter().replace does — this is the in-place URL sync that runs right
+// after a cold load, and nulling the state here would erase the chat overlay's
+// "we pushed this entry" marker on every reload.
+function routerReplace(next, state) {
   if (!next) return;
-  try { window.history.replaceState(null, '', addBase(next)); } catch (_) { /* ignore */ }
+  const nextState = state === undefined ? ((window.history && window.history.state) || null) : (state || null);
+  try { window.history.replaceState(nextState, '', addBase(next)); } catch (_) { /* ignore */ }
   _writeLastPath(next);
   window.dispatchEvent(new Event('router:change'));
 }

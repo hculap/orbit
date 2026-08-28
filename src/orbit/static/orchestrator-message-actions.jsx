@@ -103,6 +103,12 @@ function _hasCopyableText(msg) {
 
 function MessageActionRow({ msg, msgKey, role, tts, speakMessage, isSpeakingThis, ttsSupported, actions }) {
   const isUser = role === 'user';
+  // 'peer' = a message another agent sent us via the a2a bus. Replying to it is
+  // not a thing the backend supports: POST …/messages resolves the reply target
+  // and requires role == "assistant", so the composer would be cleared and the
+  // send would 400, losing whatever the user typed. Copy / pin / speak stay —
+  // they act on text we already have and carry no authorship assumption.
+  const isPeer = role === 'peer';
   const safeActions = actions || {};
   const hasText = _hasCopyableText(msg);
   // Hide entirely when there is nothing to act on (no speakable prose for
@@ -147,7 +153,7 @@ function MessageActionRow({ msg, msgKey, role, tts, speakMessage, isSpeakingThis
           onClick={() => { safeActions.copyMessage(msg); }}
         />
       )}
-      {!isUser && typeof safeActions.replyTo === 'function' && (
+      {!isUser && !isPeer && typeof safeActions.replyTo === 'function' && (
         <MessageActionButton
           icon="corner-up-left"
           title="Odpowiedz na tę wiadomość"

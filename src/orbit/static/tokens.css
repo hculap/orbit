@@ -268,6 +268,59 @@ body {
 /* fade in */
 @keyframes fadeUp { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .fade-in { animation: fadeUp 0.28s ease-out both; }
+/* Same entrance, one difference that only matters to a host of `position:fixed`
+   descendants: the fill is `backwards`, not `both`.
+   `both` keeps the animation's END value applied forever, and Blink resolves
+   the `to { transform: none }` endpoint to the interpolated IDENTITY MATRIX —
+   measured: computed transform stays `matrix(1, 0, 0, 1, 0, 0)`, never `none`.
+   Any non-`none` transform is a containing block for fixed descendants (CSS
+   Transforms), so a nested `position:fixed; inset:0` overlay silently shrinks
+   to this element's padding box instead of covering the viewport.
+   `backwards` fills only the pre-start phase (we have no animation-delay, so
+   nothing changes while it runs — verified frame-by-frame: opacity/transform
+   are bit-identical to `.fade-in` at 0/60/140 ms) and lets the element revert
+   to its own `transform: none` once the 280 ms are up. Use this on anything a
+   nested overlay can be rendered inside — see components.jsx `Modal`.
+   Caveat worth knowing: DURING those 280 ms the element IS still a containing
+   block. Every nested overlay we have needs a user click to open, so that
+   window is unreachable in practice. */
+.fade-in-transient { animation: fadeUp 0.28s ease-out backwards; }
+
+/* ── peer message (agent → agent, role='peer') ────────────────
+   A message another Claude Code session sent INTO this one. It is
+   neither the human's own input nor this agent's reply, so it wears
+   neither bubble: an inset card on an --info rail (--accent stays
+   reserved for the local agent) and one notch quieter type. */
+.peer-msg {
+  border-left: 2px solid var(--info-line);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  padding: 8px 12px;
+  min-width: 0;
+}
+.peer-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--t-2xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--info);
+}
+.peer-msg-from { font-weight: 600; overflow-wrap: anywhere; }
+.peer-msg-tag { color: var(--fg-3); text-transform: none; letter-spacing: 0; }
+.peer-msg-time { color: var(--fg-4); margin-left: auto; }
+.peer-msg-body {
+  margin-top: 6px;
+  min-width: 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.peer-msg-text { white-space: pre-wrap; }
+.peer-msg-empty { color: var(--fg-4); font-style: italic; }
 
 /* spin — shared by Spinner primitive (moved out of render-body inline <style>) */
 @keyframes hub-spin { to { transform: rotate(360deg); } }
@@ -319,17 +372,42 @@ body { background: var(--bg) !important; overflow: hidden; }
    token colours. Otherwise the github-dark stylesheet ships its own
    #0d1117 background which clashes with our surface-2. */
 .md-render pre code.hljs,
+.gh-md pre code.hljs,
 pre > code.hljs {
   background: transparent !important;
   padding: 0 !important;
 }
-.md-render pre {
+/* `.gh-md` is the class the GitHub panels give a rendered ISSUE COMMENT, and
+   it had no rule anywhere — a fenced block inside a comment fell through to
+   the UA default (white-space:pre, overflow:visible), so it could not even
+   scroll and simply pushed its column wide (measured 1049px inside a 518px
+   track). Same treatment as .md-render, one selector list. */
+.md-render pre,
+.gh-md pre {
   background: var(--surface-2);
   border: 1px solid var(--hairline);
   border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
 }
+/* The other three things a rendered markdown body can legitimately be wider
+   than its column with. They matter because the panels' columns are
+   minmax(0,1fr): an over-wide child no longer pushes the grid — it CLIPS —
+   and clipping with no scrollbar is the worst of both. Each of these was
+   measured blowing past a 518px column on its own: table 707px, bare URL
+   878px. */
+.md-render table,
+.gh-md table {
+  display: block;      /* a <table> is not a scroll container; a block is */
+  max-width: 100%;
+  overflow-x: auto;
+}
+/* `anywhere`, not `break-word`: only `anywhere` also lowers the element's
+   MIN-CONTENT width, which is exactly what a grid/flex track floors on. */
+.md-render,
+.gh-md { overflow-wrap: anywhere; }
+.md-render img,
+.gh-md img { max-width: 100%; height: auto; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    ORBIT COSMIC LAYER (v3) — keyframes + utility classes

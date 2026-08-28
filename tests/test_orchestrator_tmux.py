@@ -208,6 +208,84 @@ def test_build_spawn_cmd_never_includes_bare_flag():
     assert "-p" not in cmd and "--print" not in cmd
 
 
+def test_build_spawn_cmd_never_includes_tmux_flag():
+    """`claude --tmux` forks a NESTED tmux server on the DEFAULT socket, which
+    would collide with the user's own long-running `orchestrator` server (the
+    same collision `-L hd-orch` exists to prevent). It only became reachable
+    when `--worktree` support landed (`--tmux` requires `--worktree`), so the
+    builder refuses it the same way it refuses the billing flags."""
+    from orbit import orchestrator_tmux as mod
+    cmd = mod.build_spawn_cmd(
+        session_name="hd-abc",
+        cwd=Path("/tmp"),
+        session_id="abc",
+        append_system_prompt_paths=[],
+    )
+    assert "--tmux" not in cmd
+
+
+def test_build_spawn_cmd_emits_worktree_as_a_single_token(tmp_path):
+    """`--worktree=<name>` must be ONE argv token, not two.
+
+    The two-token form would put an attacker-ish name like `-p` at an argv
+    boundary where the billing guard below would see it as a standalone flag
+    and raise — and, worse, where claude could parse it as one.
+    """
+    from orbit import orchestrator_tmux as mod
+    cmd = mod.build_spawn_cmd(
+        session_name="hd-abc",
+        cwd=tmp_path,
+        session_id="abc",
+        append_system_prompt_paths=[],
+        worktree="feat-1",
+    )
+    assert "--worktree=feat-1" in cmd
+    assert "--worktree" not in cmd  # never the bare two-token form
+    # Order matters only in that it must land inside the inner claude argv,
+    # after the permission mode and before any --add-dir.
+    assert cmd.index("--worktree=feat-1") > cmd.index("auto")
+
+
+def test_build_spawn_cmd_omits_worktree_when_not_requested(tmp_path):
+    """Re-passing --worktree on an EXISTING worktree can `git reset --hard` it
+    back to the base ref, so the flag is cold-spawn-only."""
+    from orbit import orchestrator_tmux as mod
+    cmd = mod.build_spawn_cmd(
+        session_name="hd-abc",
+        cwd=tmp_path,
+        session_id="abc",
+        append_system_prompt_paths=[],
+    )
+    assert not any(c.startswith("--worktree") for c in cmd)
+
+
+def test_build_spawn_cmd_rejects_an_invalid_worktree_name(tmp_path):
+    from orbit import orchestrator_tmux as mod
+    for bad in ("-p", "feat/x", "a b", "a" * 65):
+        with pytest.raises(ValueError):
+            mod.build_spawn_cmd(
+                session_name="hd-abc",
+                cwd=tmp_path,
+                session_id="abc",
+                append_system_prompt_paths=[],
+                worktree=bad,
+            )
+
+
+def test_build_spawn_cmd_rejects_a_missing_cwd(tmp_path):
+    """`tmux new-session -c <missing>` fails opaquely — the pane just dies and
+    the caller reports the generic "claude REPL never became ready" after 60 s.
+    One stat turns that into a named error."""
+    from orbit import orchestrator_tmux as mod
+    with pytest.raises(ValueError, match="cwd"):
+        mod.build_spawn_cmd(
+            session_name="hd-abc",
+            cwd=tmp_path / "does-not-exist",
+            session_id="abc",
+            append_system_prompt_paths=[],
+        )
+
+
 def test_build_spawn_cmd_includes_session_id_flag_on_first_spawn():
     from orbit import orchestrator_tmux as mod
     cmd = mod.build_spawn_cmd(
@@ -528,6 +606,58 @@ def test_acquire_race_lost_waiter_retry_forwards_resume_and_model(tmp_path, monk
     )
     assert "--model haiku" in argv_str, (
         f"retry dropped model= ; expected --model haiku in argv, got: {argv_str}"
+    )
+
+
+def test_acquire_race_lost_waiter_retry_forwards_worktree(tmp_path, monkeypatch):
+    """Same fallback path as the test above, now for `worktree=`.
+
+    This path has already silently dropped `resume` (069b83f → 6389a58) and
+    `model` (→ 9683643). Dropping `worktree` would be worse than either: the
+    retry would spawn claude in the REPO ROOT, the worktree would never be
+    created, and the session would quietly run against the main checkout while
+    the sidecar claims it is isolated.
+    """
+    from orbit import orchestrator_tmux as mod
+
+    class _FailFirstThenSucceed(FakeTmuxRunner):
+        def __init__(self):
+            super().__init__()
+            self.spawn_calls = 0
+
+        async def spawn(self, name, cmd):
+            self.spawn_calls += 1
+            if self.spawn_calls == 1:
+                await asyncio.sleep(0.1)
+                raise RuntimeError("simulated cold-start failure on first spawner")
+            await super().spawn(name, cmd)
+
+        async def wait_until_ready(self, name):
+            await asyncio.sleep(0.02)
+            return True
+
+    runner = _FailFirstThenSucceed()
+    pool = _make_pool(runner)
+    monkeypatch.setattr(mod, "_CLAUDE_CONFIG", tmp_path / ".claude.json")
+
+    async def driver():
+        t1 = asyncio.create_task(pool.acquire(
+            session_id="raced", cwd=tmp_path, worktree="feat-1",
+        ))
+        await asyncio.sleep(0.03)
+        t2 = asyncio.create_task(pool.acquire(
+            session_id="raced", cwd=tmp_path, worktree="feat-1",
+        ))
+        return await asyncio.gather(t1, t2, return_exceptions=True)
+
+    results = _run(driver())
+    assert len([r for r in results if not isinstance(r, Exception)]) == 1, results
+
+    spawn_calls = [c for c in runner.calls if c[0] == "spawn"]
+    assert len(spawn_calls) == 1
+    argv_str = " ".join(spawn_calls[0][1])
+    assert "--worktree=feat-1" in argv_str, (
+        f"retry dropped worktree= ; got: {argv_str}"
     )
 
 

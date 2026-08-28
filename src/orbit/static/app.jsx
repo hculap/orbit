@@ -769,7 +769,12 @@ function MobileHub() {
 
   const sectionProps = {
     compact: true,
-    isActive: section === 'orchestrator',
+    // Must mirror the chat wrapper's own `display` condition below EXACTLY
+    // (`section === 'orchestrator' && !detail`), not just the section: a detail
+    // overlay hides the chat while leaving it mounted, and consumers use
+    // isActive to mean "on screen" — the artifact viewer gates its Escape
+    // handler on it so an invisible modal can't steal the keypress.
+    isActive: section === 'orchestrator' && !detail,
     keyboardOpen,
     sharePath,
     shareFile,

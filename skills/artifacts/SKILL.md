@@ -1,6 +1,6 @@
 ---
 name: artifacts
-description: Twórz bogate, trwałe "artefakty" (wykresy, mapy, embedy YouTube, klipy audio/wideo, interaktywny HTML, wygenerowane obrazy, pliki do pobrania) zamiast wklejać surowe dane do czatu. Create rich, persistent artifacts — Chart.js charts, Leaflet maps, YouTube embeds, audio/video clips, interactive HTML, generated images, downloadable files — surfaced in the orbit as a toast/modal + gallery. Use whenever a deliverable is visual, interactive, playable, downloadable, or worth keeping: "make a chart", "show this on a map", "embed this video", "build an interactive page", "generate an image", "narysuj wykres", "pokaż na mapie", "zrób interaktywną stronę". DON'T use for plain prose, short replies, or code snippets the user copies inline.
+description: Twórz bogate, trwałe "artefakty" (wykresy, mapy, embedy YouTube, klipy audio/wideo, interaktywny HTML, wygenerowane obrazy, pliki do pobrania) zamiast wklejać surowe dane do czatu. Create rich, persistent artifacts — Chart.js charts, Leaflet maps, YouTube embeds, audio/video clips, interactive HTML, generated images, downloadable files — surfaced in the orbit as a toast/modal + gallery. Use whenever a deliverable is visual, interactive, playable, downloadable, or worth keeping: "make a chart", "show this on a map", "embed this video", "build an interactive page", "generate an image", "narysuj wykres", "pokaż na mapie", "zrób interaktywną stronę". DON'T use for plain prose, short replies, or code snippets the user copies inline. THIS skill owns the hetzner/dashboard artifact (panel toast + gallery); it is NOT the native `Artifact` tool that publishes to claude.ai — see "Panel artifact vs claude.ai artifact" in the body before reaching for either.
 metadata:
   emoji: 🎨
 ---
@@ -19,6 +19,31 @@ Plain answers stay in chat as markdown. Reach for an artifact only when the
 output is visual, interactive, playable, or downloadable — something worth
 keeping around and re-opening later.
 
+## 1a. Panel artifact vs. claude.ai artifact — do not mix them up
+
+Two different things are called "artifact" in this session. They are not
+interchangeable and the user cares which one they get:
+
+| | **Panel artifact** (this skill) | **claude.ai artifact** (native `Artifact` tool) |
+|---|---|---|
+| How | `artifacts_cli.py create …` | the built-in `Artifact` tool |
+| Lands in | the orbit — toast/modal + gallery | a page hosted on claude.ai |
+| Lives on | this box, in the agent's `.artifacts/` dir (committable) | Anthropic's servers |
+| Visible in the panel | **yes** | **no** — the user sees nothing in the dashboard |
+| Good for | anything produced ON this server: charts, media, files, reports | a page the user wants to open/share outside the box |
+
+**Default is the panel artifact.** The user is talking to you *through* the
+dashboard, so "zrób artefakt" almost always means the thing that shows up there.
+
+Reach for the native `Artifact` tool **only when the user explicitly asks for a
+claude.ai artifact / a shareable link / a page outside this server**. A
+PreToolUse hook blocks it until then, and its refusal message tells you to ask
+first — that is the design, not a bug.
+
+**When the request is ambiguous, ASK** (AskUserQuestion, two options: "artefakt
+w panelu" vs "artefakt claude.ai"). Do not guess and do not silently publish to
+claude.ai.
+
 ## 2. WHEN to make an artifact vs. just write markdown
 
 | MAKE an artifact for…                                    | DON'T — keep it in chat                                  |
@@ -31,6 +56,7 @@ keeping around and re-opening later.
 | A rich / interactive HTML page                           | Anything you'd normally just say                         |
 | A generated image                                        |                                                          |
 | A downloadable file (CSV, PDF, zip, dataset…)            |                                                          |
+| A long document to READ — report, notes, analysis (`doc`)|                                                          |
 
 Rule of thumb: if the user would want to **look at it, play it, interact with
 it, or download it** — make an artifact. If they'd just **read it** — markdown.
@@ -47,9 +73,24 @@ it, or download it** — make an artifact. If they'd just **read it** — markdo
 | `audio`   | (from file)    | Existing audio file → **copied** into the dir             |
 | `video`   | (from file)    | Existing video file → **copied** into the dir             |
 | `file`    | (from file)    | Any downloadable file → **copied** into the dir           |
+| `doc`     | `.md` / `.txt` | Markdown/plain text (raw, a path, or stdin) → **written**  |
 
 `chart` / `map` / `youtube` have `src: null` — the spec lives inline. The other
 types have a real payload file and `src: "<id>.<ext>"`.
+
+### `doc` vs `file` — read it or save it?
+
+- **`doc`** = the user wants to **read or copy** it in the panel: a report,
+  notes, an analysis, a long snippet. Rendered as formatted markdown with a
+  **Kopiuj** button; still downloadable. Max 1 MB. Pass the text directly —
+  no need to write a temp file first.
+- **`file`** = the user wants the **bytes**: a CSV export, a PDF, a zip.
+
+The panel previews `file` artifacts too, so nothing is download-only any more:
+PDFs render inline (plus a page-1 thumbnail in the gallery), text-family files
+(csv, json, log, yaml, code…) show a scrollable preview with **Kopiuj**, and
+only genuinely opaque binaries fall back to the plain download row. Downloads
+keep the **original filename** you passed in, not the internal `art-<id>.<ext>`.
 
 ## 4. Spec shapes
 
@@ -108,6 +149,11 @@ python3 $CLI create --type html --title "Dashboard" --spec-file page.html --open
 python3 $CLI create --type image --title "Diagram" /tmp/diagram.png --open
 python3 $CLI create --type audio --title "Narration" /tmp/voice.mp3
 python3 $CLI create --type file  --title "Export"   /tmp/data.csv
+
+# Doc — a document to READ. Raw text, a path, or stdin all work.
+python3 $CLI create --type doc --title "Raport tygodniowy" "# Raport\n\n- punkt 1\n- punkt 2"
+python3 $CLI create --type doc --title "Notatki" ~/Sync/notatki.md --open
+some-command | python3 $CLI create --type doc --title "Wynik analizy" --stdin
 
 # Manage existing artifacts
 python3 $CLI open   art-20260529T183001-a3f9c1

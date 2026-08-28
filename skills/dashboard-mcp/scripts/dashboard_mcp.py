@@ -10,7 +10,9 @@ can: list / search / find / create / start / stop the *other* PARA agent
 sessions, send a message and wait for the reply (the request/response
 primitive), read transcripts, and — for interactive children — capture the live
 pane and answer AskUserQuestion / permission prompts by injecting keystrokes.
-Plus PARA discovery (`para_overview`) and `notify` (Telegram push).
+Plus PARA discovery (`para_overview`), `notify` (Telegram push), and the
+geolocation round trip (`geolocate` / `geo_nearby`) that asks the USER'S browser
+for its device position over the dashboard's per-session SSE hub.
 
 Single source of truth = the dashboard HTTP API; this is a thin adapter, it does
 NOT re-implement session/PARA logic.
@@ -78,8 +80,30 @@ class ApiError(Exception):
         super().__init__(f"HTTP {status}: {body[:300]}")
 
 
-def _http(method, path, query=None, body=None, timeout=None):
-    """Call the dashboard API. Returns parsed JSON (or {'_raw': text})."""
+# The geo routes are the only agent→server calls carrying a credential: the
+# shared CLI token the dashboard writes for its skills (injected per-spawn as
+# HD_ARTIFACT_TOKEN_FILE). Opt-in per call, see `_http(auth=…)`.
+GEO_TOKEN_HEADER = "X-Geo-Token"
+GEO_TOKEN_FILE = (os.environ.get("HD_ARTIFACT_TOKEN_FILE")
+                  or os.path.expanduser("~/.orchestrator/artifact_token"))
+
+
+def _geo_token():
+    """The shared CLI secret, or '' — a missing file must produce the server's
+    typed 403, never a traceback here."""
+    try:
+        with open(GEO_TOKEN_FILE, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _http(method, path, query=None, body=None, timeout=None, auth=False):
+    """Call the dashboard API. Returns parsed JSON (or {'_raw': text}).
+
+    `auth=True` attaches X-Geo-Token; the default leaves every pre-existing
+    call byte-identical on the wire.
+    """
     url = API + path
     if query:
         clean = {k: v for k, v in query.items() if v is not None}
@@ -87,6 +111,10 @@ def _http(method, path, query=None, body=None, timeout=None):
             url += "?" + urllib.parse.urlencode(clean)
     data = None
     headers = {"Accept": "application/json"}
+    if auth:
+        token = _geo_token()
+        if token:
+            headers[GEO_TOKEN_HEADER] = token
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -508,6 +536,131 @@ def t_answer_question(args):
 
 
 # --------------------------------------------------------------------------- #
+# Geolocation — the round trip to the user's browser
+# --------------------------------------------------------------------------- #
+# Timeout ladder, must not drift from the server's: browser 20s < /wait poll 45s
+# (server clamps at 60) < request TTL 180s == our overall budget. On a /wait
+# answer `terminal:false` means THE POLL WINDOW elapsed, not the ask — re-poll
+# the same request_id; the agent must never see that intermediate state.
+GEO_OVERALL_TIMEOUT_S = 180.0
+GEO_POLL_TIMEOUT_S = 45.0
+_GEO_HTTP_STATUS = {400: "bad_request", 403: "forbidden", 404: "not_found",
+                    422: "bad_request", 429: "rate_limited"}
+
+
+def _geo_http_failure(resp):
+    """Render a dashboard 4xx/5xx in the geo API's own typed shape, so the agent
+    branches on ONE vocabulary instead of transport-vs-domain. None = not an error."""
+    code = resp.get("_http_error") if isinstance(resp, dict) else None
+    if not code:
+        return None
+    detail = resp.get("detail") or resp.get("error") or f"HTTP {code}"
+    retryable = code == 429 or code >= 500
+    return {"ok": False, "status": _GEO_HTTP_STATUS.get(code, "server_error"),
+            "terminal": not retryable, "retryable": retryable,
+            "http_status": code, "detail": detail, "hint": detail}
+
+
+def _geo_create(args):
+    """POST the ask. A non-`pending` answer (cached / no_browser / rate_limited)
+    ends this call — it already carries `retryable` + a hint for the agent."""
+    sid = (args.get("session_id") or SELF_SESSION_ID or "").strip()
+    if not sid:
+        raise ApiError(0, "no session_id: pass one, or run inside a dashboard "
+                          "session so HD_SESSION_ID names the browser to ask")
+    body = {"session_id": sid}
+    for key in ("reason", "accuracy", "max_age_s", "ttl_s"):
+        if args.get(key) is not None:
+            body[key] = args[key]
+    resp = _http("POST", "/orchestrator/geo/request", body=body, auth=True)
+    return _geo_http_failure(resp) or resp
+
+
+def _geo_abort(request_id):
+    """DELETE the ask (best effort) and render the give-up answer."""
+    try:
+        _http("DELETE", f"/orchestrator/geo/requests/{request_id}",
+              auth=True, timeout=10)
+    except ApiError as e:
+        log("geo: cancel failed:", e)
+    return {"ok": False, "status": "aborted", "terminal": True, "retryable": False,
+            "request_id": request_id, "reason": "overall_timeout",
+            "message": "Nikt nie odpowiedział w wyznaczonym czasie.",
+            "hint": "Poproś użytkownika o lokalizację w czacie."}
+
+
+def _geo_await(request_id, poll_timeout, deadline):
+    """Re-poll /wait until a TERMINAL payload lands; on budget exhaustion
+    withdraw the ask (so its modal stops nagging) and say so."""
+    path = f"/orchestrator/geo/requests/{request_id}/wait"
+    while True:
+        window = min(poll_timeout, deadline - time.monotonic())
+        if window <= 0:
+            return _geo_abort(request_id)
+        try:
+            resp = _http("GET", path, query={"timeout": round(window, 1)},
+                         timeout=window + 10, auth=True)
+        except ApiError as e:
+            if e.status != 429:
+                raise
+            resp = {"_http_error": 429}
+        failed = _geo_http_failure(resp)
+        if failed and failed["status"] != "rate_limited":
+            return failed
+        if failed:
+            time.sleep(2)
+        elif resp.get("terminal") is not False:
+            return resp
+
+
+def _geo_address(result, args):
+    """Decorate a fix with a reverse-geocoded address. A geocode failure lands in
+    `address_error` — never swallowed, never allowed to demote a good fix."""
+    fix = result.get("fix") if result.get("ok") else None
+    if not fix or args.get("address") is False:
+        return result
+    rev = _http("POST", "/orchestrator/geo/reverse", auth=True,
+                body={"lat": fix.get("lat"), "lon": fix.get("lon")})
+    failed = _geo_http_failure(rev)
+    if failed or not rev.get("ok"):
+        return {**result, "address_error": failed or rev}
+    return {**result, "address": rev.get("address")}
+
+
+def t_geolocate(args):
+    """Ask the user's browser for a device fix and block until it answers."""
+    deadline = time.monotonic() + min(
+        float(args.get("overall_timeout") or GEO_OVERALL_TIMEOUT_S), 600.0)
+    result = _geo_create(args)
+    if result.get("status") == "pending":
+        rid = result.get("request_id")
+        # floored at 1 s so a silly poll_timeout cannot become a hot loop
+        poll = max(1.0, min(float(args.get("poll_timeout") or GEO_POLL_TIMEOUT_S), 60.0))
+        result = {**_geo_await(rid, poll, deadline), "request_id": rid}
+    return _geo_address(result, args)
+
+
+def t_geo_nearby(args):
+    """POIs near the user — resolves the fix first unless lat/lon are given."""
+    lat, lon, fix = args.get("lat"), args.get("lon"), None
+    if lat is None or lon is None:
+        located = t_geolocate({**args, "address": False})
+        fix = located.get("fix") if located.get("ok") else None
+        if not fix:
+            return located
+        lat, lon = fix.get("lat"), fix.get("lon")
+    body = {"lat": lat, "lon": lon, "query": args["query"]}
+    for key in ("radius_m", "limit"):
+        if args.get(key) is not None:
+            body[key] = args[key]
+    resp = _http("POST", "/orchestrator/geo/nearby", body=body, auth=True)
+    failed = _geo_http_failure(resp)
+    if failed:
+        return failed
+    return {**resp, "fix": fix} if fix else resp
+
+
+# --------------------------------------------------------------------------- #
 # Tool registry
 # --------------------------------------------------------------------------- #
 def _S(props, required=()):
@@ -576,6 +729,30 @@ TOOLS = [
          "option_index": {"type": "integer"}, "text": {"type": "string"},
          "keys": {"type": "array", "items": {"type": "string"}},
          "settle": {"type": "number"}, "force": {"type": "boolean"}}, ["session_id"]), t_answer_question),
+    # geolocation — round trip to the USER'S browser (never the server's location)
+    ("geolocate", "Ask the USER'S BROWSER for its device position and block until it answers (the "
+     "phone/laptop looking at the dashboard — NOT this server, which sits in Helsinki). Returns "
+     "{status,fix:{lat,lon,accuracy_m,precision,ts_ms},age_s,source,address?} or a typed refusal: "
+     "cached|no_browser|denied|dismissed|unavailable|timeout|expired|disabled, each carrying retryable "
+     "+ a Polish hint. HARD RULE: retryable:false => do NOT call geolocate again this turn; read the "
+     "hint and say it to the user.",
+     _S({"session_id": {"type": "string", "description": "whose browser to ask (default: this session)"},
+         "reason": {"type": "string", "description": "shown to the user, <=200 chars"},
+         "accuracy": {"type": "string", "enum": ["fine", "coarse"]}, "poll_timeout": {"type": "number"},
+         "max_age_s": {"type": "integer", "description": "accept a cached fix this old; 0 forces fresh"},
+         "ttl_s": {"type": "number", "description": "how long the ask stays live (10..600, def 180)"},
+         "address": {"type": "boolean", "description": "reverse-geocode the fix (default true)"},
+         "overall_timeout": {"type": "number", "description": "give up + cancel after N s (def 180 = the TTL)"}}),
+     t_geolocate),
+    ("geo_nearby", "Find POIs near the user (apteka/pharmacy, restauracja, bankomat, stacja, sklep, ...). "
+     "Resolves the device fix first (cache-first, same rules + refusals as geolocate) unless lat/lon are "
+     "passed, then queries OSM. Returns {places:[{name,kind,lat,lon,distance_m,tags}],source,tag,fix}, nearest first.",
+     _S({"query": {"type": "string", "description": "PL or EN keyword, e.g. 'apteka' / 'pharmacy'"},
+         "lat": {"type": "number"}, "lon": {"type": "number"}, "session_id": {"type": "string"},
+         "radius_m": {"type": "integer", "description": "50..10000, default 1500"},
+         "limit": {"type": "integer", "description": "1..25, default 8"},
+         "reason": {"type": "string"}, "max_age_s": {"type": "integer"},
+         "overall_timeout": {"type": "number"}}, ["query"]), t_geo_nearby),
 ]
 
 TOOL_MAP = {name: fn for (name, _d, _s, fn) in TOOLS}

@@ -15,6 +15,20 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Cross-session ("peer") message handling lives in its own module; re-exported
+# here so `orchestrator_jsonl` stays the single import site for callers
+# (orchestrator_titles reads `_is_synthetic_user` off this module).
+from .orchestrator_jsonl_peer import (  # noqa: F401  (re-export)
+    _CROSS_SESSION_RE,
+    _SYNTHETIC_ORIGIN_KINDS,
+    _is_synthetic_user,
+    _origin_kind,
+    _peer_attachment_origin,
+    _peer_message,
+    _peer_meta,
+    _peer_text,
+)
+
 # Claude Code maps a cwd to a project dir by replacing every non-alphanumeric
 # char with '-' (so /home/alice → -home-alice). Derive the home slug at runtime
 # instead of hardcoding one operator's home.
@@ -168,6 +182,7 @@ _CORPUS_LIMIT = 80 * 1024
 def _build_summary(path: Path) -> dict:
     created_at = 0.0
     msg_count = 0
+    peer_msg_count = 0
     last_user = first_user = last_role = ""
     total_in = total_out = 0
     # Track the LATEST assistant turn's prompt size — this approximates current
@@ -196,15 +211,32 @@ def _build_summary(path: Path) -> dict:
             created_at = _parse_ts(evt.get("timestamp"))
             first = False
         if etype in _SKIP_TYPES or etype not in ("user", "assistant"):
+            # A peer's REPLY lands at the SENDING session as an
+            # attachment/queued_command, not as a user entry. _build_messages
+            # surfaces it as a `peer` row, so the counter has to see it here
+            # too — otherwise peer_msg_count silently undercounts that shape.
+            if _peer_attachment_origin(evt) is not None:
+                peer_msg_count += 1
             continue
         msg = evt.get("message") or {}
         content = msg.get("content")
         if etype == "user" and _is_tool_result_only(content):
             continue
+        # A peer message / task notification is machine input, not a human
+        # turn, so it must never become a preview or seed an auto-title. It
+        # DOES still count toward msg_count: it is new content in the session
+        # and the unread badge is the only signal that a peer wrote in — a
+        # peer message that never gets an assistant reply (agent busy, REPL
+        # killed) would otherwise be completely invisible. Keeping the count
+        # also keeps `last_read_msg_count` monotonic, so an existing read
+        # marker never ends up above msg_count.
+        synthetic = etype == "user" and _is_synthetic_user(evt)
+        if synthetic and _origin_kind(evt) == "peer":
+            peer_msg_count += 1
         msg_count += 1
         last_role = etype
         text = _extract_text(content)
-        if (etype == "user" and text and not _CONTROL_FULL_RE.match(text)
+        if (etype == "user" and not synthetic and text and not _CONTROL_FULL_RE.match(text)
                 and not _LOCAL_CMD_RE.match(text)):
             # Skip echo "[choice:id=opt]" / "[ask:id=value]" AND local-command /
             # bash artifacts — those aren't real user content; fall back to the
@@ -249,6 +281,9 @@ def _build_summary(path: Path) -> dict:
         "created_at": created_at or updated_at,
         "updated_at": updated_at,
         "msg_count": msg_count,
+        # Observability only — how many inbound peer messages this session
+        # received. Deliberately NOT part of msg_count.
+        "peer_msg_count": peer_msg_count,
         "last_user_preview": last_user,
         "last_role": last_role,
         "first_user_preview": first_user,
@@ -561,16 +596,53 @@ def _split_attached(blocks: list[dict]) -> list[dict]:
     return out
 
 
+def _peer_row_from_attachment(evt: dict, ts: float, turn_idx: int) -> dict | None:
+    """``role:"peer"`` row for a ``type:"attachment"`` entry, or None to drop it.
+
+    ONE attachment sub-shape is a real transcript row: a peer's reply queued
+    back into the SENDING session. Everything else (ultrathink_effort,
+    deferred_tools_delta, human-typed queued commands, …) stays dropped.
+    """
+    origin = _peer_attachment_origin(evt)
+    peer = _peer_meta(origin)
+    if peer is None:
+        return None
+    attachment = evt.get("attachment") or {}
+    if not ts:
+        ts = _parse_ts(attachment.get("timestamp"))
+    return _peer_message(peer, _peer_text(origin, attachment.get("prompt")), ts, turn_idx)
+
+
 def _build_messages(path: Path) -> dict:
     messages: list[dict] = []
     turn_idx = -1
     for evt in _iter_lines(path):
         etype = evt.get("type")
-        if etype in _SKIP_TYPES or etype not in ("user", "assistant"):
+        if etype in _SKIP_TYPES:
+            continue
+        ts = _parse_ts(evt.get("timestamp"))
+        if etype == "attachment":
+            row = _peer_row_from_attachment(evt, ts, turn_idx + 1)
+            if row is None:
+                continue
+            turn_idx += 1
+            messages.append(row)
+            continue
+        if etype not in ("user", "assistant"):
             continue
         msg = evt.get("message") or {}
         content = msg.get("content")
-        ts = _parse_ts(evt.get("timestamp"))
+        if etype == "user":
+            # A message from another Claude session — surfaced as its own
+            # role so the UI can label the sender instead of showing the
+            # harness boilerplate as if the user had typed it.
+            peer = _peer_meta(evt.get("origin"))
+            if peer is not None:
+                turn_idx += 1
+                messages.append(_peer_message(
+                    peer, _peer_text(evt.get("origin"), _extract_text(content)),
+                    ts, turn_idx))
+                continue
         if etype == "user" and _is_tool_result_only(content):
             blocks = _content_to_blocks(content)
             if blocks:

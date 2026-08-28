@@ -347,7 +347,15 @@ function IconButton({ icon, label, onClick, active = false, size = 36, style, di
 // _ActionButton + the defensive `window.Button ? … : <button>` fallbacks being
 // reinvented. `busy` shows a spinner and acts disabled. A disabled link drops
 // its href (renders a non-navigating <button disabled>) so it can't be ⌘-clicked.
-function Button({ children, onClick, href, target, rel, variant = 'ghost', icon, size = 'md', style, type = 'button', disabled = false, busy = false }) {
+//
+// `title` / `ariaLabel`: the destructure is CLOSED (no rest spread), so any
+// prop not named here is dropped by React before it can reach the DOM —
+// silently. Call sites had been passing `title="…"` for years (Make task,
+// Rozwiąż, Dopracuj) believing they had a hover tooltip; they had nothing.
+// Both are forwarded to whichever element we end up rendering. `ariaLabel`
+// rather than `aria-label` because JSX callers in this repo pass camelCase
+// (see Input) — the DOM attribute is emitted correctly either way.
+function Button({ children, onClick, href, target, rel, variant = 'ghost', icon, size = 'md', style, type = 'button', disabled = false, busy = false, title, ariaLabel }) {
   const [h, setH] = useState(false);
   const off = disabled || busy;
   const sizes = { sm: { p: '6px 10px', f: 12, h: 28 }, md: { p: '8px 14px', f: 13, h: 34 }, lg: { p: '11px 18px', f: 14, h: 42 } };
@@ -383,6 +391,7 @@ function Button({ children, onClick, href, target, rel, variant = 'ghost', icon,
   if (href && !off) {
     return (
       <a href={href} target={target} rel={rel} onClick={onClick} className={cls}
+        title={title} aria-label={ariaLabel}
         onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)}
         style={sharedStyle}>
         {inner}
@@ -391,6 +400,7 @@ function Button({ children, onClick, href, target, rel, variant = 'ghost', icon,
   }
   return (
     <button type={type} onClick={guardedClick} disabled={off} aria-busy={busy || undefined} className={cls}
+      title={title} aria-label={ariaLabel}
       onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)}
       style={sharedStyle}
     >
@@ -594,21 +604,159 @@ function KebabMenu({ items, icon = 'dots-v', size = 32, label = 'More actions' }
   );
 }
 
-function Modal({ open, onClose, title, children, width = 520, height }) {
+// `closeOnEscape` is OPT-IN (default false) on purpose: ~30 call sites already
+// exist and four of them own a hand-rolled Escape handler, while the terminal-
+// preview modals treat Escape as PAYLOAD (vim / claude's own TUI). Flipping the
+// default would break all of those at once.
+function Modal({ open, onClose, title, children, width = 520, height, closeOnEscape = false }) {
+  // BOTH hooks must sit ABOVE the `if (!open) return null` below: most call
+  // sites keep the Modal MOUNTED and merely flip `open`, so a hook placed
+  // after that early return would change the hook count between renders and
+  // crash React ("Rendered more hooks than during the previous render") the
+  // first time each of those modals opened.
+  const escCloseRef = useRef(onClose);
+  useEffect(() => { escCloseRef.current = onClose; });
+  // Move focus INTO the dialog while it owns Escape. Without this the element
+  // that held focus before keeps swallowing every keydown, and the listener
+  // below — bound to the parent `window` — never sees Escape at all. The case
+  // that matters is not theoretical: the chat's ttyd TERMINAL is an <iframe>,
+  // it grabs focus on attach, and keys pressed over it are delivered to the
+  // iframe's own document. Reproduced against a deep link (where nothing in
+  // the parent document was ever clicked): Escape did nothing whatsoever until
+  // the iframe was blurred, while the very same modal opened by CLICKING the
+  // header button closed on Escape — because the click had moved focus out of
+  // the iframe first.
+  //
+  // Skipped when focus is ALREADY inside the card: children's effects run
+  // before the parent's, so a dialog that autofocuses its first field (the
+  // "New issue" title) would otherwise have that focus stolen back here.
+  const cardRef = useRef(null);
+  const restoreRef = useRef(null);
+  // Set by the Escape effect below; read LAZILY inside the focusout handler so
+  // the declaration order of the two effects doesn't matter (the handler only
+  // ever runs long after both have mounted).
+  const escIdRef = useRef(null);
+  useEffect(() => {
+    if (!open || !closeOnEscape) return undefined;
+    const S = (typeof window !== 'undefined' && window.HubOverlayStack) || null;
+    const el = cardRef.current;
+    if (!el || typeof el.focus !== 'function') return undefined;
+    if (!el.contains(document.activeElement)) {
+      restoreRef.current = document.activeElement;
+      try { el.focus({ preventScroll: true }); } catch (_e) { el.focus(); }
+    }
+    // …and KEEP it. Taking focus once is not enough: ttyd focuses its own
+    // terminal when the socket attaches, which on a deep link happens AFTER
+    // the modal has already opened and focused itself. Measured on the
+    // /chat/<sid>/gallery deep link: card focused at t≈12.4 s, stolen by the
+    // <iframe> at t≈13.4 s — after which Escape was dead again.
+    //
+    // Only the top-most overlay pulls focus back, `relatedTarget` inside the
+    // card means the user is just moving between the dialog's own controls,
+    // and the counter means we can never end up in a focus war with whatever
+    // is on the other side — worst case we stop and Escape degrades to the
+    // X / backdrop / Back, which all still work.
+    let reasserts = 0;
+    const onFocusOut = (e) => {
+      if (S && escIdRef.current && !S.isTop(escIdRef.current)) return;
+      const next = e && e.relatedTarget;
+      const cur = cardRef.current;
+      if (!cur || (next && cur.contains(next))) return;
+      if (reasserts >= 10) return;
+      reasserts += 1;
+      // Deferred: we're inside the browser's focus transfer, and a synchronous
+      // focus() here is undone by the move already in flight.
+      setTimeout(() => {
+        const c = cardRef.current;
+        if (!c || !c.isConnected) return;              // modal closed meanwhile
+        if (c.contains(document.activeElement)) return; // someone beat us to it
+        try { c.focus({ preventScroll: true }); } catch (_e) { /* not focusable */ }
+      }, 0);
+    };
+    el.addEventListener('focusout', onFocusOut);
+    return () => {
+      el.removeEventListener('focusout', onFocusOut);
+      // Hand focus back where it came from — for the chat that means the
+      // terminal is typeable again the moment the modal closes.
+      const prev = restoreRef.current;
+      restoreRef.current = null;
+      if (!prev || typeof prev.focus !== 'function' || !document.contains(prev)) return;
+      try { prev.focus({ preventScroll: true }); } catch (_e) { /* gone / not focusable */ }
+    };
+  }, [open, closeOnEscape]);
+  useEffect(() => {
+    // Degrade to no-Escape (never throw) if overlay-stack.js didn't load.
+    const S = (typeof window !== 'undefined' && window.HubOverlayStack) || null;
+    if (!open || !closeOnEscape || !S) return undefined;
+    // Deps are [open, closeOnEscape] ONLY — onClose is read through the ref
+    // above. An inline-arrow onClose changes identity every render, and
+    // re-registering would shove this modal back to the TOP of the stack,
+    // stealing Escape from an overlay nested inside it.
+    const id = S.push(S.nextId());
+    escIdRef.current = id;
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      // Only the top-most overlay reacts — see overlay-stack.js for why DOM
+      // nesting buys no precedence here.
+      if (!S.isTop(id)) return;
+      // Escape belongs to the field while the user is typing (same rule as
+      // global-detail.jsx) — a half-written issue title/body must not be
+      // thrown away by a stray keypress.
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const fn = escCloseRef.current;
+      if (typeof fn === 'function') fn();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      S.pop(id);
+      // Stale ids must not linger: a popped id is never top, so leaving it here
+      // would permanently veto the focusout pull-back above.
+      if (escIdRef.current === id) escIdRef.current = null;
+    };
+  }, [open, closeOnEscape]);
   if (!open) return null;
   return (
     <div onClick={onClose} style={{
       // `fixed` (not `absolute`) so the backdrop always covers the FULL viewport
       // — including when a Modal is opened from inside another Modal (the editor
-      // → button-edit case), where `absolute` would clip the overlay to the
-      // parent modal's box. `.fade-in` settles to transform:none so it creates
-      // no containing block that would trap this fixed overlay.
+      // → button-edit case, and now the session-overlay modal hosting
+      // LibraryIssueList → "New issue" / ArtifactGallery → the viewer), where
+      // `absolute` would clip the overlay to the parent modal's box.
+      //
+      // A nested overlay's `position:fixed` resolves against the nearest
+      // ancestor that is a containing block for fixed descendants — NOT
+      // automatically the viewport. Here that ancestor is THIS element:
+      // `backdropFilter` makes it one (Filter Effects L2). Its padding box is
+      // bit-for-bit the viewport rect only because it is `inset:0` with NO
+      // border (padding lives INSIDE the padding box, so `padding:20` doesn't
+      // shrink it). INVARIANT: never give this backdrop a border or a non-zero
+      // inset — every nested fixed overlay would silently shrink to it, and a
+      // click on the dark strip outside would hit THIS backdrop and close the
+      // host instead of the nested dialog (taking an unsaved issue draft with
+      // it). The inner box below must likewise never become a nearer
+      // containing block — that is what `fade-in-transient` is for.
+      // Clipping is not a risk: `backdrop-filter`, unlike `filter`, does not
+      // rasterize descendants, so the inner box's `overflow:hidden` cannot clip
+      // a nested fixed overlay whose containing block is this element (an
+      // ANCESTOR of the clipping box).
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 40, padding: 20,
     }}>
-      <div onClick={e => e.stopPropagation()} className="fade-in" style={{
+      {/* `fade-in-transient`, NOT `fade-in`: the two play the identical 280 ms
+          entrance, but `.fade-in`'s `both` fill leaves a permanent identity
+          TRANSFORM on this box, which makes it a containing block for fixed
+          descendants — nearer than the backdrop above. Measured in Chromium: a
+          nested `position:fixed; inset:0` overlay came back as the card's
+          padding box (250,63,900,774) with `.fade-in` and as the viewport
+          (0,0,1400,900) with `.fade-in-transient`. See tokens.css. */}
+      {/* tabIndex -1 + no outline: the box is focusable PROGRAMMATICALLY (the
+          Escape-focus effect above) but stays out of the tab order, and taking
+          focus must not draw a ring around the whole card. */}
+      <div ref={cardRef} tabIndex={-1} onClick={e => e.stopPropagation()} className="fade-in-transient" style={{
         background: 'var(--surface-1)', border: '1px solid var(--hairline-strong)',
-        borderRadius: 'var(--r-lg)', width, maxWidth: '100%', maxHeight: '90%',
+        borderRadius: 'var(--r-lg)', width, maxWidth: '100%', maxHeight: '90%', outline: 'none',
         // Optional explicit box height. The body is `flex:1` (flex-basis 0), so a
         // tall child inside an overflow:auto body does NOT grow the box — callers
         // that want a tall modal (e.g. the shortcut editor) must size the box.

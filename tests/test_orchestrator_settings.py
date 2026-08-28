@@ -43,6 +43,25 @@ def test_defaults_include_pool_idle_ttl_s(fresh_settings):
     assert settings["pool_idle_ttl_s"] == 14400
 
 
+def test_worktree_sessions_enabled_by_default(fresh_settings):
+    """worktree_sessions_enabled default = True — the new-session modal offers
+    the "Uruchom w worktree" checkbox out of the box.
+
+    Safe as a default because the checkbox ships UNTICKED and self-disables for
+    any cwd that isn't a git repo, so no existing behaviour changes until the
+    user opts in per session. Pinned here so the default can't be flipped by
+    accident in either direction.
+    """
+    settings = fresh_settings.get_settings()
+    assert settings["worktree_sessions_enabled"] is True
+
+
+def test_worktree_sessions_flag_can_be_turned_off(fresh_settings):
+    """Level-1 rollback: a persisted False must beat the default."""
+    _run(fresh_settings.set_settings({"worktree_sessions_enabled": False}))
+    assert fresh_settings.get_flag("worktree_sessions_enabled") is False
+
+
 def test_resolve_runner_mode_validates_and_defaults(fresh_settings):
     """Single dispatch helper for all 5 one-shot sites: returns a VALIDATED mode
     and fails closed onto subscription ('interactive'), never onto the -p pool."""
@@ -228,3 +247,40 @@ def test_session_switcher_coerces_truthy_to_bool(fresh_settings):
     assert out["session_switcher_enabled"] is True
     out = _run(fresh_settings.set_settings({"session_switcher_enabled": 0}))
     assert out["session_switcher_enabled"] is False
+
+
+# ── geolocation (device round trip + OSM geocoding) ───────────────
+
+
+def test_geolocation_enabled_by_default(fresh_settings):
+    """ON by default, and safe by construction: the browser's OWN permission
+    prompt still stands between an agent and any coordinate, and the per-device
+    opt-out outranks the server flag. Pinned so the default can't drift in
+    either direction without someone deciding to."""
+    assert fresh_settings.get_flag("geolocation_enabled") is True
+    assert fresh_settings.get_settings()["geolocation_enabled"] is True
+
+
+def test_geolocation_flag_can_be_turned_off(fresh_settings, monkeypatch):
+    """Level-1 rollback: a persisted False must beat the default, and survive a
+    cache drop — this is the kill switch every geo route reads per request."""
+    out = _run(fresh_settings.set_settings({"geolocation_enabled": False}))
+    assert out["geolocation_enabled"] is False
+    monkeypatch.setattr(fresh_settings, "_data", None)
+    assert fresh_settings.get_flag("geolocation_enabled") is False
+
+
+def test_geolocation_coerces_truthy_to_bool(fresh_settings):
+    out = _run(fresh_settings.set_settings({"geolocation_enabled": "yes"}))
+    assert out["geolocation_enabled"] is True
+    out = _run(fresh_settings.set_settings({"geolocation_enabled": 0}))
+    assert out["geolocation_enabled"] is False
+
+
+def test_geocode_flag_is_separate_from_the_round_trip(fresh_settings):
+    """The OSM lookups are the only part with third-party EGRESS, so they get
+    their own switch — turning them off must NOT disable the fix itself."""
+    assert fresh_settings.get_flag("geolocation_geocode_enabled") is True
+    _run(fresh_settings.set_settings({"geolocation_geocode_enabled": False}))
+    assert fresh_settings.get_flag("geolocation_geocode_enabled") is False
+    assert fresh_settings.get_flag("geolocation_enabled") is True

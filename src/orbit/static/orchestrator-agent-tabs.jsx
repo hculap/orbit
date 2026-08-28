@@ -157,10 +157,17 @@ async function _latestSessionForScope(scope) {
 
 // ── context-menu chrome (shared by the tab menu + the per-session row menu) ──
 function _MenuItem({ it }) {
+  // A DISABLED button fires no mouse events, so its native `title` tooltip can
+  // never appear — which meant the one thing explaining a greyed-out row was
+  // unreachable exactly when it was needed ("nie mogę zamknąć agenta" with no
+  // stated reason). Render the hint as a real line when disabled; keep the
+  // tooltip for enabled rows, where it does work and would only add noise.
+  const showHint = !!(it.hint && it.disabled);
   return (
-    <button role="menuitem" disabled={it.disabled} onClick={it.onClick} title={it.hint || undefined}
+    <button role="menuitem" disabled={it.disabled} onClick={it.onClick}
+      title={(!it.disabled && it.hint) || undefined}
       style={{
-        display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+        display: 'flex', alignItems: showHint ? 'flex-start' : 'center', gap: 10, width: '100%',
         padding: '9px 10px', minHeight: 40, border: 'none', background: 'transparent',
         borderRadius: 'var(--r-control)', cursor: it.disabled ? 'default' : 'pointer',
         fontFamily: 'inherit', fontSize: 'var(--t-sm)', textAlign: 'left',
@@ -170,7 +177,14 @@ function _MenuItem({ it }) {
       onMouseEnter={(e) => { if (!it.disabled) e.currentTarget.style.background = 'var(--surface-2)'; }}
       onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}>
       <Icon name={it.icon} size={14} color={it.danger ? 'var(--danger, #f87171)' : 'var(--fg-2)'} />
-      <span>{it.label}</span>
+      <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, paddingTop: showHint ? 1 : 0 }}>
+        <span>{it.label}</span>
+        {showHint && (
+          <span className="mono" style={{
+            fontSize: 'var(--t-2xs)', color: 'var(--fg-4)', whiteSpace: 'normal', lineHeight: 1.35,
+          }}>{it.hint}</span>
+        )}
+      </span>
     </button>
   );
 }
@@ -230,7 +244,14 @@ function _TabContextMenu({ group, scope, x, y, compact, onClose, onSelect, actio
       onClick: () => { onClose(); actions.newSession(scope); } },
     { icon: 'close',
       label: `Zamknij agenta${closableCount ? ` (${closableCount})` : ''}`,
-      hint: closableCount === 0 ? 'wszystkie sesje keep-alive' : undefined,
+      // Actionable, not just diagnostic: the way out is to unpin, and with
+      // zero closable sessions the row is disabled, so this text is the ONLY
+      // thing that can say so (see _MenuItem — a disabled button has no tooltip).
+      hint: closableCount === 0
+        ? (sessions.length
+          ? `${sessions.length === 1 ? 'Sesja jest' : 'Wszystkie sesje są'} keep-alive — odepnij, żeby zamknąć agenta`
+          : 'Ten agent nie ma żywych sesji')
+        : undefined,
       disabled: closableCount === 0,
       danger: true, onClick: () => { onClose(); actions.closeAgent(group); } },
   ];
@@ -649,12 +670,20 @@ function AgentTabs({ groups, activeKey, onSelect, iconFor, compact, refresh, ref
           || (g.topSessionId && runningById.has(g.topSessionId))
         ));
         const pulse = busy && dragKey !== g.key;
+        // Keep-alive is an AGENT-level fact, not just a session-level one: it
+        // decides whether "Zamknij agenta" works at all, and until it showed
+        // here the only way to find out was to open the tab's context menu and
+        // find the action greyed out. Same `pin-fill` glyph the session row
+        // uses, so the two read as the same state.
+        const keepAlive = (g.sessions || []).filter((s) => s && s.persistent).length;
         return (
           <button
             key={g.key} role="tab" aria-selected={active}
             className={pulse ? 'hub-think-tab' : undefined}
             draggable={!compact}
-            title={g.name + (g.count > 1 ? ` · ${g.count} sesji` : '') + (busy ? ' · tura w toku' : '') + ' — prawy klik: opcje'}
+            title={g.name + (g.count > 1 ? ` · ${g.count} sesji` : '')
+              + (keepAlive ? ` · ${keepAlive} keep-alive` : '')
+              + (busy ? ' · tura w toku' : '') + ' — prawy klik: opcje'}
             onClick={() => onTabClick(g)}
             onContextMenu={(e) => { e.preventDefault(); setFlyout(null); setMenu({ group: g, scope: scopeFor(g), x: e.clientX, y: e.clientY }); }}
             onMouseEnter={(e) => onTabEnter(g, e)}
@@ -689,6 +718,14 @@ function AgentTabs({ groups, activeKey, onSelect, iconFor, compact, refresh, ref
               {icon ? icon : <Icon name="bot" size={13} stroke={1.8} />}
             </span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.name}</span>
+            {keepAlive > 0 && (
+              // Sits before the count so the badge stays the rightmost thing
+              // (it's the element the eye scans for). aria-label because the
+              // tab's own title is a long composed string.
+              <span aria-label={`${keepAlive} keep-alive`} style={{ flexShrink: 0, display: 'inline-flex', lineHeight: 1 }}>
+                <Icon name="pin-fill" size={11} color={active ? 'var(--accent)' : 'var(--fg-4)'} />
+              </span>
+            )}
             {g.count > 1 && (
               <span className="mono" style={{
                 flexShrink: 0, fontSize: 'var(--t-2xs)', padding: '0 5px',

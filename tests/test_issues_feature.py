@@ -175,3 +175,99 @@ def test_create_repo_for_item_refuses_when_nothing_to_commit(monkeypatch, tmp_pa
     res = _run(lib.create_github_repo_for_item(tmp_path, "private"))
     assert res["ok"] is False
     assert "nothing to commit" in res["error"]
+
+
+# ── issue LIST body: the search haystack ────────────────────────
+#
+# The panel's search box matches issue DESCRIPTIONS client-side, which only
+# works because the list request asks gh for `body`. Nothing renders that
+# field, so every failure mode here is silent: drop it from the field list and
+# search quietly degrades to title+number; splice prose into it and the user
+# gets hits they cannot see. Hence the guards.
+
+
+def test_issue_list_requests_body_for_search():
+    """`body` on the LIST is what makes description search possible.
+
+    A payload-size cleanup that drops it leaves the panel rendering and the
+    search box accepting input — it just stops finding anything in a
+    description. Nothing else in the repo would go red, so this does.
+    """
+    from orbit import library_github as gh
+    assert "body" in gh._ISSUE_LIST_FIELDS.split(",")
+
+
+def test_clip_issue_body_truncates_without_polluting_the_haystack():
+    from orbit import library_github as gh
+
+    cap = gh._ISSUE_LIST_BODY_CAP
+    src = {"number": 1, "title": "t", "body": "x" * (cap + 1)}
+    out = gh._clip_issue_body(src)
+
+    assert out is not src                       # copied, never mutated
+    assert src["body"] == "x" * (cap + 1)       # input untouched
+    assert out["body"] == "x" * cap             # cut exactly at the cap…
+    assert len(out["body"]) == cap              # …and not one char over
+    assert out["body_truncated"] is True        # the fact rides out of band
+    assert out["number"] == 1 and out["title"] == "t"
+
+
+def test_clip_issue_body_adds_no_searchable_marker():
+    """No prose in the haystack.
+
+    `body` exists on the list ONLY as something to substring-match against, so
+    a truncation marker would be matchable text with nothing on screen to
+    explain the hit — typing "obcięte" used to return exactly the issues whose
+    bodies happened to be long.
+    """
+    from orbit import library_github as gh
+
+    out = gh._clip_issue_body({"body": "a" * (gh._ISSUE_LIST_BODY_CAP + 500)})
+    assert set(out["body"]) == {"a"}            # nothing but the original text
+    assert "…" not in out["body"]
+    assert "obcięte" not in out["body"]
+
+
+def test_clip_issue_body_passes_short_and_odd_items_through():
+    """Under the cap nothing is copied — identity, not equality, on purpose."""
+    from orbit import library_github as gh
+
+    exactly = {"body": "y" * gh._ISSUE_LIST_BODY_CAP}
+    for item in (
+        {"number": 3},                       # missing body (gh omits it)
+        {"body": None},                      # empty body arrives as null
+        {"body": "short"},
+        exactly,                             # boundary: == cap is NOT over
+    ):
+        assert gh._clip_issue_body(item) is item
+    assert gh._clip_issue_body("not-a-dict") == "not-a-dict"
+
+
+def test_list_issues_clips_bodies(monkeypatch, tmp_path):
+    from orbit import library_github as gh
+
+    async def fake_resolve(_path):
+        return ("o", "r")
+
+    seen = {}
+    long_body = "z" * (gh._ISSUE_LIST_BODY_CAP + 42)
+
+    async def fake_run(args, cwd=None, stdin_input=None, timeout_s=None):
+        seen["args"] = args
+        payload = [
+            {"number": 1, "title": "long", "body": long_body},
+            {"number": 2, "title": "short", "body": "ok"},
+        ]
+        return (0, json.dumps(payload).encode(), b"")
+
+    monkeypatch.setattr(gh, "gh_resolve_repo", fake_resolve)
+    monkeypatch.setattr(gh, "_gh_run", fake_run)
+
+    res = _run(gh.list_issues(tmp_path, state="open", limit=50))
+    assert res["ok"] is True
+    assert "body" in seen["args"][seen["args"].index("--json") + 1]
+    first, second = res["items"]
+    assert len(first["body"]) == gh._ISSUE_LIST_BODY_CAP
+    assert first.get("body_truncated") is True
+    assert second["body"] == "ok"
+    assert "body_truncated" not in second

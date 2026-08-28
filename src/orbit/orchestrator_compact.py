@@ -398,7 +398,25 @@ async def compact_session(old_id: str) -> dict:
     prompt = _build_compact_prompt(active_tasks)
     summary = await _run_summary_turn(old_id, prompt)
     seed_text = _format_seed_message(summary, active_tasks, old_id)
-    new_id = await _seed_new_session(seed_text)
+
+    # Mint the new id and stamp its agent scope BEFORE the seed turn.
+    # `_make_compact_runner` reads the sidecar to resolve cwd/model/prompts, so
+    # writing it afterwards (as this did originally) meant the seed turn ran in
+    # $HOME and the compacted session kept no cwd at all — it showed up as
+    # "Global" and its transcript landed under the wrong project slug. The
+    # worktree fields ride along for the same reason: a compacted continuation
+    # belongs in the same worktree as the conversation it continues.
+    old_meta_pre = meta_mod.get_meta(old_id)
+    new_id = str(uuid.uuid4())
+    await meta_mod.set_meta(
+        new_id,
+        cwd=old_meta_pre.get("cwd") or "",
+        lib_id=old_meta_pre.get("lib_id") or "",
+        worktree_name=old_meta_pre.get("worktree_name") or "",
+        worktree_path=old_meta_pre.get("worktree_path") or "",
+        worktree_repo_root=old_meta_pre.get("worktree_repo_root") or "",
+    )
+    new_id = await _seed_new_session(seed_text, new_id=new_id)
 
     # Verify the new JSONL was actually created — otherwise the seed turn
     # silently failed and we'd leave a dangling sidecar entry.

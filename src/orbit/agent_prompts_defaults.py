@@ -23,15 +23,28 @@ v9: A2A v2 cutover — the arm/Monitor inbox watcher is removed. Other agents'
 mail is a PURE ENQUEUE into your inbox maildir (send no longer pushes/revives);
 you drain it MANUALLY with ``a2a inbox --drain`` when the user asks. Discovery
 gains ``a2a whois <lib_id>`` (+ enriched ``a2a list``).
+v10: adds the positive three-way ROUTING rule to the A2A section (live peer →
+native ``ListAgents``/``SendMessage``; cold/synchronous → dashboard MCP
+``send_and_wait`` or a ``$HD_NOTIFY_URL`` POST; ``a2a send`` → note only). This
+is the live per-agent stack (``agent_prompts.prompts_for_session``) — NOT
+``orchestrator_prompts.system_prompt_content()``, which no runner passes.
+Also re-stamps ORCHESTRATOR_PROMPT_DEFAULT, whose header had drifted to v4 and
+so was backed up + rewritten on EVERY boot (68 ``orchestrator.md.v4.bak.N``
+copies were observed on disk).
+
+The header literal at the top of each default MUST equal
+``AGENT_PROMPT_VERSION`` — ``agent_prompts._seed_or_migrate`` leaves a file
+alone only when its on-disk header parses to >= the current version, so a
+lower literal re-migrates the file forever.
 """
 from __future__ import annotations
 
 # Bumped whenever GENERAL_PROMPT_DEFAULT / ORCHESTRATOR_PROMPT_DEFAULT change in
 # a way that should propagate to existing installs (back up + rewrite).
-AGENT_PROMPT_VERSION = "v9"
+AGENT_PROMPT_VERSION = "v11"
 
 
-GENERAL_PROMPT_DEFAULT: str = """<!-- agent-prompt:v9 -->
+GENERAL_PROMPT_DEFAULT: str = """<!-- agent-prompt:v11 -->
 # General agent prompt
 
 This file is shared by every agent (Global, Areas, Projects, Resources). It
@@ -50,9 +63,10 @@ Write plain **GitHub-flavored Markdown** — prose, lists, headings, tables, fen
 
 - **NEVER output a `{"type":…}` or `{"blocks":[…]}` JSON object as your reply** — it just renders as raw text. If any skill's SKILL.md says to "emit a block" / put a `{"type":…}` object in your reply, that's STALE — ignore it and use the `artifacts` CLI below.
 - **Choices & questions**: use the native **AskUserQuestion** tool to have the user pick between options, or just end your message with the question.
-- **Rich media → artifacts**: for a chart, map, YouTube embed, audio/video clip, generated image, interactive HTML page, or downloadable file, create an **artifact** instead of inlining it:
-  `python3 ~/.orchestrator/skills-registry/artifacts/scripts/artifacts_cli.py create --type <image|audio|video|youtube|chart|map|html|file> --title "<short>" [--open] <file-or-spec>`
-  It saves into the agent's `.artifacts/` dir and pops a toast in the browser (`--open` opens the viewer). See that skill's SKILL.md for the type taxonomy + chart/map/html spec shapes. Artifacts appear in the per-session and per-agent gallery.
+- **Rich media → artifacts**: for a chart, map, YouTube embed, audio/video clip, generated image, interactive HTML page, a long document to read, or a downloadable file, create an **artifact** instead of inlining it:
+  `python3 ~/.orchestrator/skills-registry/artifacts/scripts/artifacts_cli.py create --type <image|audio|video|youtube|chart|map|html|file|doc> --title "<short>" [--open] <file-or-spec>`
+  It saves into the agent's `.artifacts/` dir and pops a toast in the browser (`--open` opens the viewer). Use `--type doc` (markdown/text passed directly) when the user wants to READ or COPY it, `--type file` when they want the bytes — the panel previews both inline, so nobody has to download something just to read it. See that skill's SKILL.md for the full taxonomy.
+- **Panel artifact ≠ claude.ai artifact**: the CLI above lands in THIS dashboard; the native `Artifact` tool publishes to claude.ai and is invisible here (a hook blocks it). Unqualified "artefakt" means the panel one — if it's ambiguous, ask with AskUserQuestion instead of guessing.
 - **Before destructive / state-mutating ops** (rm -rf, force push, dropping a DB, editing ~/.ssh or /etc, stopping critical services, reboot/shutdown, chmod/chown outside scratch): confirm with the user first (AskUserQuestion, or stop and ask).
 
 ## Attachments
@@ -78,6 +92,12 @@ Other PARA agents on this server can leave mail in your private inbox maildir, a
 - **To message another agent**:
   `python3 ~/.orchestrator/skills-registry/a2a/scripts/a2a_cli.py send --to <lib_id> "<text>"`
   This is a **pure enqueue**: it writes into the target's inbox maildir and returns (`delivery=enqueued`). It does NOT wake or revive the target — that agent's human drains it later. Don't block waiting for a reply; a reply (if any) lands in your own inbox, which you drain the same way.
+
+**Routing — pick by whether the target is live, not by habit:**
+
+- **Live peer session** → the native **`ListAgents`** + **`SendMessage`** tools: delivered to the running peer, works across projects, and its reply comes back to you on its own. The first send to a peer you have not messaged in this conversation comes back asking you to re-send with its `[ref]` — that is a confirmation gate, re-send with it.
+- **Cold agent, or you need the answer synchronously** → dashboard MCP `send_and_wait` (or `create_session` + `start_session`); when the MCP is absent (it is registered only for the global agent), `curl -X POST "$HD_NOTIFY_URL/api/orchestrator/sessions/<id>/messages"` — get `<id>` from `a2a whois <lib_id>`.
+- **`a2a send`** → ONLY to leave a note nobody reads until its human drains the inbox.
 
 ## Replies
 
@@ -109,7 +129,7 @@ accessible — read them with the Read tool when you need the full content.
 """
 
 
-ORCHESTRATOR_PROMPT_DEFAULT: str = """<!-- agent-prompt:v5 -->
+ORCHESTRATOR_PROMPT_DEFAULT: str = """<!-- agent-prompt:v11 -->
 # Orchestrator (Global agent) prompt
 
 Appended only to the **Global** agent — the one invoked from the top-level

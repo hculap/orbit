@@ -713,6 +713,11 @@ function LibraryAgentPanel({ kind, item, libId, compact, onChangeTab }) {
   const [regenError, setRegenError] = _lapUseState(null);
   const [createBusy, setCreateBusy] = _lapUseState(false);
   const [createError, setCreateError] = _lapUseState(null);
+  const [confirmOpen, setConfirmOpen] = _lapUseState(false);
+  // Same server flag the orchestrator "+" reads; gates only the checkbox row.
+  const _lapServerSettings = ((window.HubSettings && window.HubSettings.useServerSettings) || (() => ({ cfg: {} })))();
+  const worktreeFlag = !!(_lapServerSettings && _lapServerSettings.cfg
+    && _lapServerSettings.cfg.worktree_sessions_enabled === true);
 
   const cwd = _lapUseMemo(() => _lapDeriveCwd(kind, libId), [kind, libId]);
   const libIdParam = _lapUseMemo(() => _lapDeriveLibIdParam(kind, libId), [kind, libId]);
@@ -810,11 +815,16 @@ function LibraryAgentPanel({ kind, item, libId, compact, onChangeTab }) {
     try { window.location.assign((window.HUB_BASE_PATH || '') + `/orchestrator/${sid}`); } catch (_) { /* ignore */ }
   }, [router]);
 
-  const onCreate = _lapUseCallback(async () => {
+  const doCreate = _lapUseCallback(async (opts) => {
     if (createBusy) return;
+    setConfirmOpen(false);
     setCreateBusy(true); setCreateError(null);
     try {
       const body = { cwd, lib_id: libIdParam, model: (profile && profile.model) || null };
+      if (opts && opts.worktree) {
+        body.worktree = true;
+        if (opts.worktreeName) body.worktree_name = opts.worktreeName;
+      }
       const r = await fetch(apiUrl('/api/orchestrator/sessions'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -828,6 +838,17 @@ function LibraryAgentPanel({ kind, item, libId, compact, onChangeTab }) {
       setCreateError(e.message || 'create failed');
     } finally { setCreateBusy(false); }
   }, [createBusy, profile, cwd, libIdParam, onSelectSession]);
+
+  // Opens the shared confirm modal (window.NewSessionModal) so this button
+  // gets the same worktree option as the orchestrator "+". Falls straight
+  // through to creation when that module isn't loaded. Declared AFTER
+  // doCreate — a `const` referenced in a dep array is read at definition
+  // time, so the reverse order is a TDZ ReferenceError.
+  const onCreate = _lapUseCallback(() => {
+    if (createBusy) return;
+    if (window.NewSessionModal) { setConfirmOpen(true); return; }
+    doCreate(null);
+  }, [createBusy, doCreate]);
 
   const promptsLoading = prompts === null;
 
@@ -906,6 +927,17 @@ function LibraryAgentPanel({ kind, item, libId, compact, onChangeTab }) {
             }}>{cwd}</code> and the saved agent profile.
           </div>
           <NewSessionButton busy={createBusy} error={createError} onCreate={onCreate} />
+          {window.NewSessionModal && (
+            <window.NewSessionModal
+              open={confirmOpen}
+              onClose={() => setConfirmOpen(false)}
+              onConfirm={doCreate}
+              agentName={libId}
+              agentCwd={cwd}
+              worktreeEnabled={worktreeFlag}
+              busy={createBusy}
+            />
+          )}
         </Card>
 
         {/* New-session button lives in the dedicated Card above; the

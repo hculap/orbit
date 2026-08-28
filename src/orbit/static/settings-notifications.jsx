@@ -61,7 +61,8 @@ function _ActionButton({ children, onClick, disabled, variant = 'ghost', icon })
 
 // ── topic metadata (server-side mutes) ──────────────────────────────────────
 const _NOTIFY_TOPICS = [
-  { key: 'cron',   label: 'Cron jobs',   desc: 'Awarie zaplanowanych zadań.' },
+  { key: 'cron',     label: 'Cron — awarie', desc: 'Nieudane przebiegi zaplanowanych zadań.' },
+  { key: 'cron-out', label: 'Cron — wyniki', desc: 'Output udanych przebiegów (raporty, zrzuty).' },
   { key: 'agent',  label: 'Agent skill', desc: 'Powiadomienia z sesji agenta.' },
   { key: 'chat',   label: 'Chat',        desc: 'Zakończenie tury z narzędziami gdy nie patrzysz.' },
   { key: 'tasks',  label: 'Zadania',     desc: 'Przypomnienia o zadaniach (tasks reminders).' },
@@ -469,6 +470,234 @@ function _MutesGroup() {
   );
 }
 
+// ── per-topic routing (one forum supergroup, one thread per topic) ──────────
+// Backend contract: notify_topics.py. Blank group = legacy single-chat
+// behaviour, which is also the rollback — so the input being empty is a valid
+// steady state, not an error, and the UI must not nag about it.
+function _ThreadBadge({ threadId }) {
+  const mapped = Number.isInteger(threadId) && threadId > 0;
+  return (
+    <span
+      className="mono"
+      title={mapped ? `message_thread_id=${threadId}` : 'Trafia do wątku General grupy'}
+      style={{
+        fontSize: 'var(--t-xs)', padding: '2px 7px', borderRadius: 999,
+        background: mapped ? 'var(--ok-bg, var(--surface-3))' : 'var(--surface-3)',
+        color: mapped ? 'var(--ok, var(--fg-2))' : 'var(--fg-3)',
+        border: '1px solid var(--hairline)', whiteSpace: 'nowrap',
+      }}>
+      {mapped ? `wątek #${threadId}` : 'General'}
+    </span>
+  );
+}
+
+function _RoutingGroup() {
+  const toast = _nUseToast();
+  const [group, setGroup] = _nUseState('');
+  const [topics, setTopics] = _nUseState({});
+  const [known, setKnown] = _nUseState([]);
+  const [loaded, setLoaded] = _nUseState(false);
+  const [busy, setBusy] = _nUseState(false);
+  const [readError, setReadError] = _nUseState(null);
+  const [testing, setTesting] = _nUseState(null); // topic key mid-test
+
+  const load = _nUseCallback(async () => {
+    try {
+      const r = await fetch(window.apiUrl('/api/notify/routes'));
+      if (!r.ok) throw new Error(`http ${r.status}`);
+      const body = await r.json();
+      if (!body || body.ok === false) throw new Error((body && body.error) || 'odczyt nieudany');
+      setGroup(body.group_chat_id || '');
+      setTopics(body.topics && typeof body.topics === 'object' ? body.topics : {});
+      setKnown(Array.isArray(body.known_topics) ? body.known_topics : []);
+      setReadError(null);
+    } catch (e) {
+      setReadError((e && e.message) || 'błąd');
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  _nUseEffect(() => { load(); }, [load]);
+
+  const save = _nUseCallback(async (nextGroup, nextTopics) => {
+    setBusy(true);
+    try {
+      const r = await fetch(window.apiUrl('/api/notify/routes'), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_chat_id: nextGroup, topics: nextTopics }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || `http ${r.status}`);
+      }
+      const body = await r.json();
+      // The server sanitizes — render what it STORED, so a rejected chat id
+      // (silently dropped to "") is visible instead of lingering in the box.
+      setGroup(body.group_chat_id || '');
+      setTopics(body.topics || {});
+      if (toast) {
+        toast(body.group_chat_id
+          ? 'Zapisano routing wątków'
+          : 'Routing wyłączony — wszystko wraca na jeden czat', 'ok');
+      }
+    } catch (e) {
+      if (toast) toast('Zapis nieudany: ' + ((e && e.message) || 'błąd'), 'err');
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
+  const discover = _nUseCallback(async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(window.apiUrl('/api/notify/routes/discover'), { method: 'POST' });
+      const body = await r.json().catch(() => ({}));
+      const groups = Array.isArray(body.groups) ? body.groups : [];
+      const forums = groups.filter((g) => g && g.is_forum);
+      if (!forums.length) {
+        if (toast) toast(body.error || 'Nie znaleziono grupy z wątkami', 'err');
+        return;
+      }
+      setGroup(forums[0].chat_id);
+      if (toast) {
+        toast(forums.length === 1
+          ? `Znaleziono: ${forums[0].title || forums[0].chat_id}`
+          : `Znaleziono ${forums.length} grup — wstawiono pierwszą (${forums[0].title || forums[0].chat_id})`,
+        'ok');
+      }
+    } catch (e) {
+      if (toast) toast('Wykrywanie nieudane: ' + ((e && e.message) || 'błąd'), 'err');
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
+  const createTopics = _nUseCallback(async () => {
+    if (!group.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch(window.apiUrl('/api/notify/routes/create-topics'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_chat_id: group.trim() }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || `http ${r.status}`);
+      }
+      const body = await r.json();
+      setGroup(body.group_chat_id || '');
+      setTopics(body.topics || {});
+      const results = Array.isArray(body.results) ? body.results : [];
+      const failed = results.filter((x) => x && !x.ok);
+      if (toast) {
+        // Partial success is normal (missing Manage Topics right, name clash) —
+        // name the first failure rather than a bare "nie wszystko się udało".
+        if (failed.length) {
+          toast(`Utworzono ${results.length - failed.length}/${results.length}. `
+            + `Błąd (${failed[0].topic}): ${failed[0].error || 'nieznany'}`, 'err');
+        } else {
+          toast(`Utworzono/zmapowano ${results.length} wątków`, 'ok');
+        }
+      }
+    } catch (e) {
+      if (toast) toast('Tworzenie wątków nieudane: ' + ((e && e.message) || 'błąd'), 'err');
+    } finally {
+      setBusy(false);
+    }
+  }, [group, toast]);
+
+  const sendTest = _nUseCallback(async (topic) => {
+    setTesting(topic);
+    try {
+      const r = await fetch(window.apiUrl('/api/notify/test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, message: `Test kanału „${topic}".` }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!body || body.ok === false) throw new Error(body.reason || body.error || `http ${r.status}`);
+      if (toast) {
+        // thread_fallback = delivered, but the mapped thread is gone. Saying
+        // just "wysłano" would hide a stale mapping until someone noticed the
+        // messages piling up in General.
+        toast(body.thread_fallback
+          ? `Wysłano do „${topic}", ale zmapowany wątek nie istnieje — trafiło do General. Utwórz wątki ponownie.`
+          : `Wysłano do „${topic}"`, body.thread_fallback ? 'err' : 'ok');
+      }
+    } catch (e) {
+      if (toast) toast('Test nieudany: ' + ((e && e.message) || 'błąd'), 'err');
+    } finally {
+      setTesting(null);
+    }
+  }, [toast]);
+
+  const rows = known.length ? known : _NOTIFY_TOPICS.map((t) => t.key);
+  const meta = Object.fromEntries(_NOTIFY_TOPICS.map((t) => [t.key, t]));
+  const routingOn = !!group.trim();
+
+  return (
+    <_nSettingGroup
+      title="Kanały tematów (wątki Telegrama)"
+      scope="server"
+      desc="Każdy temat trafia do własnego wątku jednej grupy forum. Puste pole = wszystko idzie na jeden czat, jak dotąd."
+    >
+      <_SecretInputRow
+        label="Grupa forum (chat_id)"
+        hint="Supergrupa z włączonymi Topics. Bot musi być jej administratorem z prawem „Manage Topics”."
+        placeholder="-1001234567890"
+        value={group}
+        onChange={setGroup}
+        onSave={() => save(group.trim(), topics)}
+        busy={busy}
+        disabled={!loaded || !!readError}
+      />
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <_ActionButton icon="search" disabled={busy || !loaded} onClick={discover}>
+          Wykryj grupę
+        </_ActionButton>
+        <_ActionButton icon="plus" variant="primary" disabled={busy || !routingOn} onClick={createTopics}>
+          Utwórz wątki
+        </_ActionButton>
+      </div>
+
+      {loaded && !readError && rows.map((key) => {
+        const info = meta[key] || { label: key, desc: '' };
+        const entry = topics[key] || {};
+        return (
+          <_nSettingCard key={key} style={{ padding: '10px 12px', background: 'var(--surface-2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 160px', minWidth: 0 }}>
+                <div style={{ fontSize: 'var(--t-sm)', fontWeight: 500 }}>{info.label}</div>
+                <div className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-3)' }}>{info.desc}</div>
+              </div>
+              {routingOn ? <_ThreadBadge threadId={entry.thread_id} /> : null}
+              <_ActionButton
+                variant="quiet"
+                disabled={busy || testing === key}
+                onClick={() => sendTest(key)}
+              >
+                {testing === key ? 'wysyłam…' : 'Test'}
+              </_ActionButton>
+            </div>
+          </_nSettingCard>
+        );
+      })}
+
+      {!loaded && <Spinner label="Ładowanie routingu…" inline size={14} />}
+      {loaded && readError && (
+        <_nStatusBanner
+          variant="err"
+          label={'Nie udało się odczytać routingu (' + readError + ') — powiadomienia nadal działają na jednym czacie.'}
+          inline
+        />
+      )}
+    </_nSettingGroup>
+  );
+}
+
 // ── tab body ─────────────────────────────────────────────────────────────────
 function SettingsNotifications({ settings, updateSettings }) {
   return (
@@ -484,6 +713,8 @@ function SettingsNotifications({ settings, updateSettings }) {
       </_nSettingGroup>
 
       <_TelegramGroup />
+
+      <_RoutingGroup />
 
       <_MutesGroup />
     </div>

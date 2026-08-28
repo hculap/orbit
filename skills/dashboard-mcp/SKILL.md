@@ -1,6 +1,6 @@
 ---
 name: dashboard-mcp
-description: Use this skill to drive THIS orbit system with typed MCP tools (mcp__dashboard__*) instead of ad-hoc curl — search/list/find/create/start/stop the other PARA agent sessions, send a message and wait for the reply, read transcripts, drive interactive children (detect + answer their AskUserQuestion / permission prompts by injecting keystrokes into the tmux pane), plus PARA discovery and Telegram notify. This is how the Global agent delegates work to child agents and orchestrates a real multi-agent loop "in the user's name". Triggers (EN) — "delegate to an agent", "spawn a session", "orchestrate agents", "ask the X agent", "drive another session", "answer the question in session Y", "list/search my sessions", "notify me when". Triggers (PL) — "deleguj do agenta", "odpal sesję", "zapytaj agenta X", "steruj inną sesją", "odpowiedz na pytanie w sesji", "orkiestracja agentów". Backed by a zero-dependency stdio MCP server bundled in the repo (skills/dashboard-mcp/) and registered for the Global agent on boot.
+description: Use this skill to drive THIS orbit system with typed MCP tools (mcp__dashboard__*) instead of ad-hoc curl — search/list/find/create/start/stop the other PARA agent sessions, send a message and wait for the reply, read transcripts, drive interactive children (detect + answer their AskUserQuestion / permission prompts by injecting keystrokes into the tmux pane), plus PARA discovery and Telegram notify. This is how the Global agent delegates work to child agents and orchestrates a real multi-agent loop "in the user's name". Triggers (EN) — "delegate to an agent", "spawn a session", "orchestrate agents", "ask the X agent", "drive another session", "answer the question in session Y", "list/search my sessions", "notify me when". Triggers (PL) — "deleguj do agenta", "odpal sesję", "zapytaj agenta X", "steruj inną sesją", "odpowiedz na pytanie w sesji", "orkiestracja agentów". Also owns the device-geolocation round trip — ask the USER'S browser where it is and what is near it (EN — "where am I", "nearest pharmacy", "how far is X"; PL — "gdzie jestem", "moja lokalizacja", "co jest najbliżej", "najbliższa apteka"). Backed by a zero-dependency stdio MCP server bundled in the repo (skills/dashboard-mcp/) and registered for the Global agent on boot.
 metadata: {"clawdbot":{"emoji":"🔌","requires":{"bins":["python3","tmux"],"env":[]}}}
 ---
 
@@ -49,6 +49,48 @@ answer a menu (`option_index` | `text` | `keys`).
 
 Notify: `notify(text,topic?,url?)` — Telegram push to the phone.
 
+Geolocation: **`geolocate(reason?,…)`** — ask the user's browser for a device fix;
+**`geo_nearby(query,…)`** — POIs around it.
+
+## Geolocation (the round trip to the user's browser)
+
+`geolocate` asks the **browser looking at the dashboard** — the user's phone or
+laptop — for `navigator.geolocation`, over the per-session SSE hub, and blocks
+until it answers. It is **not** the server's location (this box lives in a
+Helsinki datacentre; never answer "where am I" from CLAUDE.md).
+
+```
+geolocate(reason="najbliższa apteka")   → {status:"fixed", fix:{lat,lon,accuracy_m,precision,ts_ms},
+                                           age_s, source:"browser-gps", address:{…}}
+geo_nearby(query="apteka", radius_m=1500)
+                                        → {places:[{name,kind,lat,lon,distance_m,tags}], source, tag, fix}
+```
+
+- **`reason` is shown to the user** — write it in their language and make it
+  specific ("najbliższa apteka", not "location").
+- **The hard rule: `retryable:false` ⇒ do NOT call `geolocate` again this turn.**
+  Read the `hint` (it is written in Polish, for the user) and say it. Statuses:
+  `fixed` / `cached` (a fix from the server's in-memory cache — quote `age_s`
+  when it matters), `no_browser` (nobody has the dashboard open — ask in chat),
+  `denied` / `device_opt_out` / `dismissed` / `insecure_context` / `no_api`
+  (never retry), `unavailable` / `timeout` (**one** retry with
+  `accuracy:"coarse"`), `expired` / `aborted`, `disabled` (Ustawienia → Serwer),
+  `rate_limited` (wait `retry_after_s`).
+- **`max_age_s`** governs the cache: default 300 s, `0` forces a fresh reading.
+  A follow-up question in the same conversation should reuse the default rather
+  than re-prompting the user's device.
+- **`address`** (default true) reverse-geocodes the fix. A geocode failure comes
+  back as `address_error` alongside a perfectly good `fix` — report the
+  coordinates, not an error. `geo_nearby` resolves the fix the same way (pass
+  `lat`/`lon` yourself to skip the round trip entirely).
+- **Privacy — say this if the user asks.** The dashboard keeps the fix in memory
+  only and never writes it to disk, but it **does** land in this session's
+  transcript, and with geocoding enabled the coordinates leave the box for public
+  OSM servers (Nominatim / Overpass). "Zapomnij lokalizację" in Settings clears
+  both the cache and the geocode caches.
+- Plot a fix or a POI list with the `artifact` skill's `map` type rather than
+  pasting raw coordinates.
+
 ## The canonical delegation loop
 
 ```
@@ -78,4 +120,8 @@ create + clean up throwaway sessions.
   `HD_SESSION_ID`) unless `force:true` — never type into your own pane.
 - `delete_session` is destructive (transcript + sidecar); prefer `stop_session`.
 - `turn_idx`/`since_turn` are cursors you re-read, never stable keys.
+- `geolocate`/`geo_nearby` carry the shared CLI token (`X-Geo-Token`, read from
+  `HD_ARTIFACT_TOKEN_FILE`); every other tool sends no credential. The browser's
+  own permission gate still stands between you and any coordinate — a refusal is
+  an answer, not an obstacle to work around.
 - Single-user Tailscale box, localhost only — don't expose the server beyond localhost.

@@ -44,6 +44,14 @@ _TOPIC_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _MAX_MUTE_TOPICS = 64
 
 try:
+    from . import notify_topics as _topics  # type: ignore[attr-defined]
+    _TOPICS_OK = True
+except Exception as e:  # pragma: no cover — defensive
+    _logger.warning("notify_routes: notify_topics unavailable, routing routes disabled: %s", e)
+    _topics = None  # type: ignore[assignment]
+    _TOPICS_OK = False
+
+try:
     from . import secrets_manager as _sm  # type: ignore[attr-defined]
     from . import secrets_paths as _secrets_paths  # type: ignore[attr-defined]
     _MUTES_OK = True
@@ -278,6 +286,112 @@ def register(app: FastAPI) -> None:
             _logger.exception("notify_routes: test push failed")
             return {"ok": False, "error": f"send failed: {exc}"}
         return result
+
+    # ── per-topic routing: one supergroup, one forum thread per topic ────
+    # Not credentials either (a group id is not a secret and is useless without
+    # the bot token), so these skip the captcha for the same reason mutes do.
+
+    @app.get("/api/notify/routes")
+    async def api_notify_routes_get() -> dict:
+        if not _TOPICS_OK:
+            return {"ok": False, "error": "routing unavailable in this build",
+                    "group_chat_id": "", "topics": {}, "known_topics": []}
+        try:
+            cfg = _topics.get_config()
+        except Exception as exc:  # noqa: BLE001 — never 500 the Settings mount
+            _logger.exception("notify_routes: read routing failed")
+            return {"ok": False, "error": f"read failed: {exc}",
+                    "group_chat_id": "", "topics": {}, "known_topics": []}
+        return {
+            "ok": True,
+            "group_chat_id": cfg.get("group_chat_id", ""),
+            "topics": cfg.get("topics", {}),
+            "known_topics": list(_topics.KNOWN_TOPICS),
+        }
+
+    @app.put("/api/notify/routes")
+    async def api_notify_routes_put(payload: dict = Body(default={})) -> dict:
+        if not _TOPICS_OK:
+            raise HTTPException(503, detail="routing unavailable in this build")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, detail="body must be a JSON object")
+        try:
+            saved = _topics.save_config(payload)
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("notify_routes: write routing failed")
+            raise HTTPException(500, detail=f"write failed: {exc}") from exc
+        return {"ok": True, **saved, "known_topics": list(_topics.KNOWN_TOPICS)}
+
+    @app.post("/api/notify/routes/discover")
+    async def api_notify_routes_discover() -> dict:
+        if not hasattr(_notify_mod, "discover_forum_topics"):
+            return {"ok": False, "error": "discover unavailable in this build", "groups": []}
+        try:
+            return await _notify_mod.discover_forum_topics()
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("notify_routes: discover failed")
+            return {"ok": False, "error": f"discover failed: {exc}", "groups": []}
+
+    @app.post("/api/notify/routes/create-topics")
+    async def api_notify_routes_create(payload: dict = Body(default={})) -> dict:
+        """Create a forum thread per requested topic, then persist the mapping.
+
+        Partial success is the norm (the bot may lack *Manage Topics*, or one
+        name may collide), so every topic reports its own outcome and whatever
+        DID get created is saved — re-running only fills the gaps.
+        """
+        if not _TOPICS_OK or not hasattr(_notify_mod, "create_forum_topic"):
+            raise HTTPException(503, detail="routing unavailable in this build")
+        group = _require_str(payload, "group_chat_id", max_len=64)
+        requested = payload.get("topics")
+        if requested is None:
+            requested = list(_topics.KNOWN_TOPICS)
+        if not isinstance(requested, list) or not requested:
+            raise HTTPException(400, detail="topics must be a non-empty list")
+        if len(requested) > _MAX_MUTE_TOPICS:
+            raise HTTPException(400, detail=f"too many topics (max {_MAX_MUTE_TOPICS})")
+        for t in requested:
+            if not isinstance(t, str) or not _TOPIC_KEY_RE.match(t):
+                raise HTTPException(400, detail=f"invalid topic name: {t!r}")
+
+        cfg = _topics.get_config()
+        mapping = dict(cfg.get("topics") or {})
+        results: list[dict] = []
+        for index, topic in enumerate(requested):
+            existing = (mapping.get(topic) or {}).get("thread_id")
+            if existing:
+                results.append({"topic": topic, "ok": True, "thread_id": existing,
+                                "skipped": "already mapped"})
+                continue
+            # Plain name: Telegram renders the icon beside it, so an emoji in
+            # the name shows up twice in the tab bar.
+            title = topic
+            icon_emoji = _notify_mod._FORUM_ICON_EMOJI.get(topic)
+            icon_id = await _notify_mod.forum_icon_id(icon_emoji) if icon_emoji else None
+            try:
+                created = await _notify_mod.create_forum_topic(
+                    chat_id=group, name=title,
+                    icon_custom_emoji_id=icon_id,
+                    icon_color=_notify_mod.forum_icon_color(index),
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("notify_routes: createForumTopic failed (%s)", topic)
+                results.append({"topic": topic, "ok": False, "error": str(exc)})
+                continue
+            if created.get("ok"):
+                mapping[topic] = {"thread_id": created["thread_id"], "title": title}
+                results.append({"topic": topic, "ok": True, "thread_id": created["thread_id"]})
+            else:
+                results.append({"topic": topic, "ok": False, "error": created.get("error")})
+
+        try:
+            saved = _topics.save_config({"group_chat_id": group, "topics": mapping})
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("notify_routes: saving created topics failed")
+            raise HTTPException(500, detail=f"write failed: {exc}") from exc
+        return {"ok": any(r["ok"] for r in results), "results": results, **saved}
 
     # ── per-topic mutes (no captcha — topic names, not a credential) ──────
     # NOTIFY_DISABLE_TOPICS read/write without the captcha friction of the

@@ -110,7 +110,12 @@ function blockHasContent(b) {
 
 function messageHasVisibleContent(msg) {
   if (!msg) return false;
-  if (msg.role === 'user') return true;
+  // 'peer' rows (another session's words, relayed by the a2a bus) are kept
+  // unconditionally like user rows: the backend emits `blocks: []` for an empty
+  // peer body and PeerMessage renders its own "(pusta wiadomość)" placeholder —
+  // filtering here would make that branch unreachable and silently swallow the
+  // fact that a peer wrote something.
+  if (msg.role === 'user' || msg.role === 'peer') return true;
   const blocks = Array.isArray(msg.blocks) ? msg.blocks : [];
   return blocks.some(blockHasContent);
 }
@@ -126,6 +131,40 @@ function _resolveMessageActions(actions, msg) {
   };
 }
 
+// A 'peer' row is ANOTHER agent's message relayed into this transcript by the
+// a2a bus — neither the local user nor the local agent wrote it, so it must
+// never fall through to the assistant branch (that would print a foreign
+// message under this agent's own name). The real card is window.PeerMessage,
+// published by orchestrator.jsx (loaded AFTER this file, hence the window
+// lookup at render time). The inline fallback only exists so a half-stale
+// cached bundle degrades to an unattributed quote instead of crashing the whole
+// transcript on an undefined element type.
+function PeerBubble({ msg, sessionId, onOpenLightbox, msgKey, tightBelow }) {
+  const Impl = window.PeerMessage;
+  if (Impl) {
+    return <Impl msg={msg} sessionId={sessionId} onOpenLightbox={onOpenLightbox}
+      msgKey={msgKey} tightBelow={tightBelow} />;
+  }
+  const key = (typeof msgKey === 'function') ? msgKey(msg) : null;
+  const from = (msg && msg.peer && (msg.peer.from_name || msg.peer.from)) || 'agent';
+  const text = (Array.isArray(msg.blocks) ? msg.blocks : [])
+    .filter(blockHasContent)
+    .map(b => String(b.text != null ? b.text : (b.content || '')))
+    .join('\n\n');
+  return (
+    <div id={key ? ('msg-' + key) : undefined} className="fade-in"
+      style={{ marginBottom: tightBelow ? 12 : 22 }}>
+      <div className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-3)' }}>
+        {from} · wiadomość od agenta {fmtTime(msg && msg.ts)}
+      </div>
+      <div style={{
+        fontSize: 'var(--t-md)', lineHeight: 1.55, color: 'var(--fg-2)', marginTop: 4,
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      }}>{text || '(pusta wiadomość)'}</div>
+    </div>
+  );
+}
+
 function MessageBubbleImpl({ msg, sessionId, onOpenLightbox, showMeta = true, tightBelow = false, toolResultMap, tts, speakMessage, msgKey, messageActions, agentLabel }) {
   const [hubSettings] = window.useSettings();
   const hideToolActions = hubSettings && hubSettings.showToolActions === false;
@@ -134,6 +173,10 @@ function MessageBubbleImpl({ msg, sessionId, onOpenLightbox, showMeta = true, ti
   const t = fmtTime(msg.ts);
   const myKey = (typeof msgKey === 'function') ? msgKey(msg) : null;
   const bubbleId = myKey ? ('msg-' + myKey) : undefined;
+  if (msg.role === 'peer') {
+    return <PeerBubble msg={msg} sessionId={sessionId} onOpenLightbox={onOpenLightbox}
+      msgKey={msgKey} tightBelow={tightBelow} />;
+  }
   if (isUser) {
     const textBlock = blocks.find(b => b && (b.kind === 'text' || b.kind === 'markdown'));
     const rawText = textBlock ? (textBlock.text || textBlock.content || '') : (msg.text || '');
@@ -350,6 +393,6 @@ function ChatTranscript({ messages, streaming, scrollRef, suggestions, onSuggest
 const MessageBubble = React.memo(MessageBubbleImpl);
 
 Object.assign(window, {
-  Meta, MessageBubble, StreamingBubble, ThinkingDots, SuggestionChips, ChatTranscript,
+  Meta, MessageBubble, PeerBubble, StreamingBubble, ThinkingDots, SuggestionChips, ChatTranscript,
   blockHasContent, messageHasVisibleContent, SpeakButton,
 });

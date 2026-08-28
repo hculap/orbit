@@ -1853,6 +1853,11 @@ function ConversationModal({ open, onClose, conversation, recentMessages, msgKey
             const flat = _convFlattenForBubble(m);
             if (!flat) return null;
             const isUser = m.role === 'user';
+            // A `peer` row is another session's message. It shares the agent's
+            // side of the thread positionally, so without a label it reads as
+            // this agent's own output — name the sender instead.
+            const isPeer = m.role === 'peer';
+            const peerLabel = isPeer && window.peerSenderLabel ? window.peerSenderLabel(m.peer) : null;
             return (
               <div key={msgKey ? msgKey(m) : Math.random()}
                 style={{
@@ -1865,6 +1870,11 @@ function ConversationModal({ open, onClose, conversation, recentMessages, msgKey
                   color: 'var(--fg-2)',
                   fontSize: 'var(--t-sm)', lineHeight: 1.45,
                 }}>
+                {peerLabel && (
+                  <div style={{ fontSize: 'var(--t-2xs)', color: 'var(--fg-4)', marginBottom: 4 }}>
+                    {peerLabel}
+                  </div>
+                )}
                 {flat}
               </div>
             );

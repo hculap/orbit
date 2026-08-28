@@ -78,12 +78,25 @@ class TmuxClaudeRunner:
         extra_prompt_path: Path | None = None,
         agent_skills_dir: Path | None = None,
         env_extra: dict[str, str] | None = None,
+        transcript_cwd: Path | None = None,
+        worktree: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.has_run_before = has_run_before
         self.model = model.strip() if isinstance(model, str) and model.strip() else None
         self._pool = pool
         self._cwd = Path(cwd) if cwd is not None else HOME
+        # Where claude WRITES the transcript, which is not always where it was
+        # LAUNCHED. On a cold `--worktree=<name>` spawn we launch from the repo
+        # root and claude chdirs into the worktree during startup, so the JSONL
+        # lands under the worktree's project slug. Anchoring the tail on
+        # `_cwd` there means a turn that SUCCEEDED produces no tail bytes and
+        # dies at TURN_TAIL_TIMEOUT_S (600 s) with "timed out waiting for JSONL
+        # flush". Defaults to `_cwd`, so non-worktree sessions are unchanged.
+        self._transcript_cwd = Path(transcript_cwd) if transcript_cwd is not None else self._cwd
+        # `--worktree=<name>` for the COLD spawn only — see
+        # orchestrator_worktree.resolve_spawn_target, which owns the decision.
+        self._worktree = worktree
         # Per-spawn env (scope `.env` secrets) forwarded to build_spawn_cmd as
         # `-e K=V`. Honored ONLY on a fresh spawn — see TmuxPool.acquire.
         self._env_extra = dict(env_extra) if env_extra else None
@@ -207,7 +220,7 @@ class TmuxClaudeRunner:
         # claude exit with "Session ID is already in use". Use `--resume`
         # instead so claude reopens the existing transcript. The detection
         # uses our slug helper, which matches claude's actual file layout.
-        existing_jsonl = tail_mod.jsonl_path_for(self._cwd, self.session_id)
+        existing_jsonl = tail_mod.jsonl_path_for(self._transcript_cwd, self.session_id)
         wants_resume = existing_jsonl.is_file()
         # Wrap acquire in a Task so `cancel()` can break the in-flight
         # readiness wait. Without this, a user-issued cancel during cold
@@ -222,6 +235,7 @@ class TmuxClaudeRunner:
                 resume=wants_resume,
                 model=self.model,
                 env_extra=self._env_extra,
+                worktree=self._worktree,
             )
         )
         try:
@@ -267,7 +281,7 @@ class TmuxClaudeRunner:
         # shows "Cześć! W czym mogę pomóc?" for every subsequent prompt even
         # though claude is generating different content (observed UAT
         # 2026-05-15: 3 different prompts → same stale response in 3 bubbles).
-        jsonl_path = tail_mod.jsonl_path_for(self._cwd, self.session_id)
+        jsonl_path = tail_mod.jsonl_path_for(self._transcript_cwd, self.session_id)
         try:
             self._jsonl_offset = jsonl_path.stat().st_size if jsonl_path.exists() else 0
         except OSError:

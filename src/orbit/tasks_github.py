@@ -807,6 +807,14 @@ _repo_labels_cache: dict[str, set[str]] = {}
 # Stable palette so a freshly auto-created label isn't a random gh color.
 _AREA_LABEL_COLOR = "5319e7"
 _PROJ_LABEL_COLOR = "1d76db"
+_GLOBAL_LABEL_COLOR = "586069"
+
+# A task that belongs to no area and no project is tagged with a bare
+# ``global`` (see tasks.py). That label is minted by the dashboard exactly like
+# the two namespaced ones, so it has to be auto-provisioned with them —
+# otherwise the first global task in a repo dies on
+# ``could not add label: 'global' not found``.
+_GLOBAL_LABEL = "global"
 
 
 async def _repo_labels(repo: str) -> set[str]:
@@ -825,19 +833,23 @@ async def _repo_labels(repo: str) -> set[str]:
 
 
 async def ensure_labels(repo: str, labels: list[str] | None) -> None:
-    """Create any missing ``area:*`` / ``proj:*`` labels in ``repo``.
+    """Create any missing ``area:*`` / ``proj:*`` / ``global`` labels in ``repo``.
 
     The dashboard tags each task with an ``area:<slug>`` / ``proj:<slug>``
-    label, but ``gh`` refuses to attach a label that doesn't exist yet — so
-    the first task in a brand-new PARA area/project would fail. This creates
-    only those two namespaces (never touches labels the user already has, so
-    custom colors/descriptions are preserved) and is a no-op once cached.
+    label — or a bare ``global`` when it belongs to neither — but ``gh``
+    refuses to attach a label that doesn't exist yet, so the first task in a
+    brand-new PARA area/project (or the first global task in a repo) would
+    fail. This creates only labels the dashboard itself mints; anything the
+    user typed is left alone, so custom colors/descriptions are preserved and
+    a mistyped label still surfaces as an error instead of being silently
+    created. No-op once cached.
     """
     if not repo or "/" not in repo:
         return
     wanted = [
         lab for lab in (labels or [])
-        if isinstance(lab, str) and (_AREA_LABEL_RE.match(lab) or _PROJ_LABEL_RE.match(lab))
+        if isinstance(lab, str)
+        and (_AREA_LABEL_RE.match(lab) or _PROJ_LABEL_RE.match(lab) or lab == _GLOBAL_LABEL)
     ]
     if not wanted:
         return
@@ -845,10 +857,14 @@ async def ensure_labels(repo: str, labels: list[str] | None) -> None:
     for lab in wanted:
         if lab in existing:
             continue
-        is_area = bool(_AREA_LABEL_RE.match(lab))
-        slug = lab.split(":", 1)[1]
-        desc = ("area: " if is_area else "project: ") + slug
-        color = _AREA_LABEL_COLOR if is_area else _PROJ_LABEL_COLOR
+        if lab == _GLOBAL_LABEL:
+            desc = "task not tied to an area or project"
+            color = _GLOBAL_LABEL_COLOR
+        else:
+            is_area = bool(_AREA_LABEL_RE.match(lab))
+            slug = lab.split(":", 1)[1]
+            desc = ("area: " if is_area else "project: ") + slug
+            color = _AREA_LABEL_COLOR if is_area else _PROJ_LABEL_COLOR
         try:
             await _gh_cli([
                 "label", "create", lab, "--repo", repo,

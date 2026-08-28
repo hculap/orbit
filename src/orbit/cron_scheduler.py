@@ -450,6 +450,11 @@ _NOTIFY_PRIORITY_BY_STATUS: dict[str, int] = {
     "skipped": 2,
 }
 
+#: Statuses that belong in the ALERT topic (`cron`); everything else is a
+#: result and goes to `cron-out`. A tuple rather than `== "failed"` so a future
+#: terminal status (timeout, cancelled) is one edit away from being an alert.
+_ALERT_STATUSES = ("failed", "error", "timeout")
+
 
 def _format_notify_message(run: dict) -> str:
     """Compose a human-readable push body from a run record."""
@@ -532,11 +537,17 @@ async def _maybe_notify_run(job: dict, run: dict) -> None:
     title = f"Cron · {name} · {status}"
     message = _format_notify_message(run)
 
+    # Alerts and results are different feeds and deserve different channels:
+    # `cron` is "something broke, look now", `cron-out` is "here is the output
+    # of a run that went fine". Lumping them together made the alert channel a
+    # results feed you learn to swipe past — the failures it exists for are the
+    # ones that get missed. An explicit per-job `notify.topic` still wins, on
+    # every status: an operator who named a topic meant it.
     topic_override = cfg.get("topic")
-    topic = (
-        topic_override.strip() if isinstance(topic_override, str) and topic_override.strip()
-        else "cron"
-    )
+    if isinstance(topic_override, str) and topic_override.strip():
+        topic = topic_override.strip()
+    else:
+        topic = "cron" if status in _ALERT_STATUSES else "cron-out"
     priority_cfg = cfg.get("priority")
     priority = (
         priority_cfg if isinstance(priority_cfg, int) and not isinstance(priority_cfg, bool)

@@ -23,8 +23,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
+
+# Every non-alphanumeric char → "-", matching claude-cli's own slug rule (and
+# orchestrator_teleport.cwd_to_slug, which must stay byte-identical to this).
+_SLUG_NONALNUM = re.compile(r"[^a-zA-Z0-9]")
 
 # Tuneables — overridable per-call so tests can drive faster polls without
 # patching module-level globals.
@@ -44,13 +49,21 @@ _CLAUDE_HOME: Path = Path.home() / ".claude"
 def slug_for_cwd(cwd: str | os.PathLike[str]) -> str:
     """Reproduce claude-cli's per-cwd directory slug.
 
-    Empirically (PoC commit 37e0c26, May 2026) the slug substitutes ALL of
-    ``/``, ``_``, ``.`` with ``-`` — the plan's original assumption ("only
-    ``/`` → ``-``") was wrong, and using the looser rule would point the
-    tail at a path that never exists for cwds containing ``_`` or ``.``.
+    claude replaces EVERY non-alphanumeric character with ``-``. An earlier
+    revision of this helper only substituted ``/``, ``_`` and ``.`` — which
+    happens to be correct for every path we use today (verified against a real
+    worktree transcript: ``…/orbit/.claude/worktrees/probe1`` →
+    ``-home-testuser-Projects-orbit--claude-worktrees-probe1`` under
+    both rules) but diverges the moment a path contains anything else, e.g. a
+    ``+`` (claude mangles slash-separated worktree names to ``+`` on disk).
+
+    ``orchestrator_teleport.cwd_to_slug`` has always used the correct rule;
+    having two implementations that agree only by accident is the landmine
+    this closes. The ``realpath()`` stays — ``~/Areas/Home`` is a symlink and
+    today's behaviour depends on resolving it.
     """
     real = os.path.realpath(str(cwd))
-    return "".join("-" if ch in "/_." else ch for ch in real)
+    return _SLUG_NONALNUM.sub("-", real)
 
 
 def jsonl_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:

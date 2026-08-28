@@ -492,9 +492,13 @@ async def _push_run_to_telegram(job: dict, run_id: str, payload: dict) -> None:
             code_block = "\n\n".join(chunks)
 
     priority = 5 if status == "failed" else 3
+    # Same alert/result split as _maybe_notify_run: a telegram-destination job
+    # exists to DELIVER its output, so a healthy run is a report (`cron-out`)
+    # while a failed one is still an alert (`cron`).
+    topic = "cron" if status == "failed" else "cron-out"
     try:
         await notify_fn(
-            topic="cron",
+            topic=topic,
             title=title,
             message=summary,
             code=code_block,

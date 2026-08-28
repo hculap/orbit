@@ -99,6 +99,22 @@ _DEFAULTS: dict[str, Any] = {
     # loop/cost guardrails). Runtime kill-switch — no restart needed. See
     # orchestrator_a2a.py + skills/a2a/.
     "a2a_enabled": False,
+    # Per-session git worktrees. ON: the new-session modal offers a "Uruchom w
+    # worktree" checkbox, so a session can run its claude REPL inside
+    # <repo>/.claude/worktrees/<name> via claude's own --worktree flag. Enabling
+    # this is safe by construction — the checkbox is UNTICKED by default and the
+    # option self-disables for any cwd that isn't a git repo (most ~/Areas, and
+    # Global's $HOME), so nothing changes until the user opts in per session.
+    # OFF → the checkbox never renders, the preflight route is never called, and
+    # POST /sessions rejects a `worktree` payload outright (a silently ignored
+    # flag is worse than a 400 — the UI would half-work).
+    #
+    # KILL-SWITCH SEMANTICS: this gates CREATION only. Flipping it off must
+    # never re-route an EXISTING worktree session back to the repo root — its
+    # transcript lives under the worktree's project slug, so the resolver
+    # (orchestrator_worktree.resolve_spawn_target) deliberately ignores this
+    # flag. Rollback L1 = no new worktree sessions; the old ones keep working.
+    "worktree_sessions_enabled": True,
     # Desktop ⌥+⇥ session-switcher overlay (macOS Cmd+Tab feel: hold ⌥/Option,
     # tap ⇥ Tab to cycle the warm tmux pool — all active sessions — release ⌥ to
     # jump). ON by default → DesktopHub's <SessionSwitcher> attaches its key
@@ -161,6 +177,43 @@ _DEFAULTS: dict[str, Any] = {
     # Default ON: it only reaps servers that DON'T own the socket (already
     # unreachable), fail-closed when the socket is unowned. Flip OFF to disable.
     "tmux_reap_orphan_servers": True,
+    # Server-initiated device geolocation — an agent can ask the user's BROWSER
+    # for navigator.geolocation over the EXISTING per-session SSE hub, and its
+    # CLI blocks until the browser answers with a fix / a denial / a typed
+    # failure ("gdzie jestem?", "co jest najbliżej?").
+    #
+    # ON by default, and safe by construction: the browser's OWN permission
+    # prompt still stands between any agent and any coordinate, and the
+    # per-device opt-out outranks everything server-side. Coordinates live in
+    # memory only — nothing about this feature is ever written to disk.
+    #
+    # KILL-SWITCH SEMANTICS: checked INSIDE every route (no restart needed).
+    # Rollback L1: set False (or toggle in Settings → Serwer) → every
+    # agent-facing /api/orchestrator/geo/* route 403s with an actionable
+    # detail, the CLI exits non-retryable, the frontend hook receives
+    # enabled:false so NO modal can ever appear, the browser answer/pending
+    # routes refuse in a typed body (a stale tab must stop, not retry), and
+    # geo_routes.on_feature_disabled() — wired to this PATCH — aborts the asks
+    # already on screen and drops the cached fix. Nothing survives.
+    # L2: drop the frontend (static/orchestrator-geolocation.jsx +
+    # geo-consent.js + the two addEventListener lines) — backend + skill keep
+    # working headlessly.
+    # L3: delete orchestrator_geo*.py, orchestrator_geocode.py, geo_routes.py,
+    # skills/geo/, the register_geo_routes call, the capabilities entries,
+    # these two flags and the two SessionEventHub accessors. No state file, no
+    # migration, nothing on disk to clean up.
+    "geolocation_enabled": True,
+    # Reverse-geocoding + nearby POIs (Nominatim + Overpass) on top of a fix.
+    # SEPARATE flag because it is the only part of the feature with THIRD-PARTY
+    # EGRESS: coordinates leave this box for public OSM servers. Compliance is
+    # enforced client-side (identifying User-Agent, hard 1 req/s Nominatim /
+    # 1 req/2s Overpass gate, 8 s timeout, one attempt, in-memory TTL caches) —
+    # a ban would break every other tool sharing this IP.
+    # Rollback L1: set False → POST /geo/reverse and /geo/nearby return
+    # {"ok":false,"status":"geocode_disabled"} (a body, NOT a 403) so the CLI
+    # degrades cleanly to raw lat/lon; the round trip itself keeps working.
+    # L2/L3: delete orchestrator_geocode.py + the two routes + this flag.
+    "geolocation_geocode_enabled": True,
 }
 
 # Validation bounds for non-boolean flags. Out-of-range values are dropped

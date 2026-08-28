@@ -129,11 +129,11 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Pop a modal in the browser (else: toast + gallery only)")
     p_create.add_argument("--mime", help="Explicit MIME type for file-backed artifacts")
     p_create.add_argument("--spec-file", dest="spec_file",
-                          help="Path to a JSON spec (chart/map/youtube) or raw HTML")
+                          help="Path to a JSON spec (chart/map/youtube), raw HTML, or doc text")
     p_create.add_argument("--stdin", action="store_true",
-                          help="Read the spec / HTML from stdin")
+                          help="Read the spec / HTML / doc text from stdin")
     p_create.add_argument("file", nargs="?",
-                          help="Source file (image/audio/video/file) OR inline spec/HTML")
+                          help="Source file (image/audio/video/file/doc) OR inline spec/HTML/text")
     p_create.set_defaults(func=_cmd_create)
 
     p_open = sub.add_parser("open", help="Re-open an existing artifact (pops the modal)")

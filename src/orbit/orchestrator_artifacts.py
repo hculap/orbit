@@ -44,11 +44,115 @@ GLOBAL_ARTIFACTS_ROOT = HOME / ".orchestrator" / "artifacts" / "global"
 ARTIFACT_ID_RE = re.compile(r"^art-[0-9TZ]+-[0-9a-f]{6}$")
 
 ALLOWED_TYPES = frozenset(
-    {"image", "audio", "video", "youtube", "chart", "map", "html", "file"}
+    {"image", "audio", "video", "youtube", "chart", "map", "html", "file", "doc"}
 )
 # Pure-spec types store their payload INLINE in manifest["extra"] (src=None);
 # the rest reference a sibling payload file via manifest["src"].
 SPEC_TYPES = frozenset({"chart", "map", "youtube"})
+
+# ── inline preview (read-in-place, no download) ───────────────────
+#
+# ``/file`` forces attachment + octet-stream for everything outside the
+# image/audio/video allowlist, so a PDF or a CSV could only ever be
+# DOWNLOADED. ``/preview`` serves the same bytes for READING: text-family
+# payloads as text/plain (never text/html — that is same-origin XSS), PDFs as
+# application/pdf under a sandbox CSP. Anything else stays download-only.
+
+# Default byte cap for a text preview — big enough for a long report, small
+# enough that the browser renders it without choking.
+PREVIEW_MAX_BYTES = 512_000
+# Floor for the ?limit= knob the gallery uses to fetch tile snippets.
+PREVIEW_MIN_BYTES = 256
+
+# Mimes that are text even though they do not start with ``text/``.
+_TEXT_MIMES = frozenset({
+    "application/json", "application/ld+json", "application/x-ndjson",
+    "application/xml", "application/yaml", "application/x-yaml",
+    "application/toml", "application/javascript", "application/x-javascript",
+    "application/sql", "application/x-sh", "application/x-shellscript",
+    "application/csv", "application/graphql", "image/svg+xml",
+})
+# Fallback when the manifest mime is missing or bogus (it is agent-written).
+_TEXT_EXTS = frozenset({
+    "txt", "text", "md", "markdown", "rst", "org", "csv", "tsv", "json",
+    "ndjson", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
+    "log", "xml", "svg", "html", "htm", "css", "scss", "sass", "less",
+    "py", "pyi", "js", "mjs", "cjs", "jsx", "ts", "tsx", "sh", "bash", "zsh",
+    "fish", "sql", "rs", "go", "rb", "java", "kt", "swift", "c", "h", "cc",
+    "cpp", "hpp", "cs", "php", "pl", "lua", "r", "jl", "tf", "hcl",
+    "dockerfile", "makefile", "diff", "patch", "srt", "vtt",
+})
+PDF_MIME = "application/pdf"
+
+
+def payload_ext(manifest: dict) -> str:
+    """Lower-cased extension of the payload file (``""`` when there is none)."""
+    src = manifest.get("src")
+    if not isinstance(src, str) or "." not in src:
+        return ""
+    return src.rsplit(".", 1)[-1].lower()
+
+
+def preview_kind(manifest: dict) -> str | None:
+    """``"text"`` / ``"pdf"`` / ``None`` — how (or whether) to preview inline.
+
+    ``doc`` artifacts are text by definition. Otherwise the manifest mime
+    decides, falling back to the payload extension when that mime is missing or
+    unrecognised — it is agent-written, so neither signal is trustworthy alone.
+    """
+    if manifest.get("type") in SPEC_TYPES or not manifest.get("src"):
+        return None
+    if manifest.get("type") == "doc":
+        return "text"
+    mime = manifest.get("mime")
+    mime = mime.split(";", 1)[0].strip().lower() if isinstance(mime, str) else ""
+    if mime == PDF_MIME:
+        return "pdf"
+    if mime.startswith("text/") or mime in _TEXT_MIMES:
+        return "text"
+    ext = payload_ext(manifest)
+    if ext == "pdf":
+        return "pdf"
+    if ext in _TEXT_EXTS:
+        return "text"
+    # A blank/garbage mime on an unknown extension stays download-only rather
+    # than rendering a binary blob as mojibake.
+    return None
+
+
+def read_text_head(path: Path, limit: int) -> tuple[str, int, bool]:
+    """``(text, total_bytes, truncated)`` for the head of a text payload.
+
+    Reads a bounded byte window (4 bytes per char is the UTF-8 worst case) so a
+    500 MB log can never be slurped into memory, and decodes with ``replace`` so
+    a split multi-byte sequence degrades to U+FFFD instead of raising.
+
+    ``truncated`` is derived from BYTES read vs. chars kept — comparing
+    ``len(text)`` to ``total`` alone would flag every non-ASCII file (a Polish
+    CSV decodes to fewer chars than it has bytes) as cut short.
+    """
+    total = path.stat().st_size
+    with path.open("rb") as fh:
+        raw = fh.read(min(total, max(limit, 1) * 4))
+    decoded = raw.decode("utf-8", errors="replace")
+    text = decoded[:limit]
+    return text, total, (len(raw) < total or len(text) < len(decoded))
+
+
+def header_filename(manifest: dict, fallback: str) -> str:
+    """Content-Disposition filename — the agent's original name when sane.
+
+    The manifest is agent-written, so the name is basename'd (no traversal) and
+    stripped of quotes / control chars (no header injection) before it reaches a
+    header. Anything left empty falls back to the on-disk payload name.
+    """
+    raw = (manifest.get("extra") or {}).get("filename")
+    if not isinstance(raw, str):
+        return fallback
+    name = os.path.basename(raw.replace("\\", "/").strip())
+    name = "".join(c for c in name if c.isprintable() and c not in '"\\')
+    name = name.strip().strip(".")
+    return name or fallback
 
 
 def _warn(msg: str) -> None:

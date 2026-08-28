@@ -11,6 +11,7 @@ import json
 
 from orbit import orchestrator_jsonl as jsonl
 from orbit import orchestrator_meta as meta
+from orbit import orchestrator_titles as titles
 
 
 def _write(path, lines):
@@ -88,6 +89,111 @@ def test_ai_title_record_does_not_corrupt_counts_or_created_at(tmp_path):
     assert s["ai_title"] == "Title first in file"  # blank record didn't clobber it
     assert s["msg_count"] == 1  # only the user line counts
     assert s["created_at"] > 0  # taken from the user line, not the ai-title
+
+
+# ── auto-title inputs ignore synthetic (peer / task-notification) turns ───
+def _peer_user(body="PROBE from another session", ts="2026-06-15T10:05:00Z"):
+    return {
+        "type": "user",
+        "timestamp": ts,
+        "promptSource": "system",
+        "origin": {"kind": "peer", "from": "uds:/run/user/1000/cc-socks/42.sock",
+                   "verifiedPeerPid": 42, "msg_id": "m1", "body": body},
+        "message": {"role": "user", "content":
+                    f"Another Claude session sent a message:\n<cross-session-message "
+                    f'from="uds:/run/user/1000/cc-socks/42.sock">\n{body}\n'
+                    "</cross-session-message>\n\n…permission laundering."},
+    }
+
+
+def _task_notification(ts="2026-06-15T10:06:00Z"):
+    return {
+        "type": "user",
+        "timestamp": ts,
+        "origin": {"kind": "task-notification"},
+        "promptSource": "system",
+        "message": {"role": "user",
+                    "content": "<task-notification>\n<status>completed</status>\n"
+                               "</task-notification>"},
+    }
+
+
+def _use_transcript(monkeypatch, path):
+    monkeypatch.setattr(jsonl, "jsonl_path", lambda _sid: path)
+
+
+def test_count_user_messages_skips_peer_and_task_notification(tmp_path, monkeypatch):
+    p = tmp_path / "s6.jsonl"
+    _write(p, [_user("prawdziwa wiadomość"), _peer_user(), _task_notification()])
+    _use_transcript(monkeypatch, p)
+    # Only the human turn counts — otherwise a peer ping would trip the
+    # TITLE_THRESHOLDS milestone and title the session after the peer.
+    assert titles._count_user_messages("s6") == 1
+
+
+def test_count_user_messages_counts_plain_human_turns(tmp_path, monkeypatch):
+    p = tmp_path / "s7.jsonl"
+    _write(p, [_user("a"), _user("b")])
+    _use_transcript(monkeypatch, p)
+    assert titles._count_user_messages("s7") == 2
+
+
+def test_build_excerpt_skips_synthetic_turns(tmp_path, monkeypatch):
+    p = tmp_path / "s8.jsonl"
+    _write(p, [
+        _peer_user(body="PEER-BODY-SHOULD-NOT-APPEAR"),
+        _user("o czym jest ta sesja"),
+        _task_notification(),
+    ])
+    _use_transcript(monkeypatch, p)
+    excerpt = titles._build_excerpt("s8")
+    assert "o czym jest ta sesja" in excerpt
+    assert "PEER-BODY-SHOULD-NOT-APPEAR" not in excerpt
+    assert "task-notification" not in excerpt
+
+
+def test_build_excerpt_empty_when_only_synthetic_turns(tmp_path, monkeypatch):
+    p = tmp_path / "s9.jsonl"
+    _write(p, [_peer_user(), _task_notification()])
+    _use_transcript(monkeypatch, p)
+    assert titles._build_excerpt("s9") == ""
+
+
+# ── a genuine prompt tagged promptSource:"system" is NOT synthetic ────────
+def _system_prompt(text, ts="2026-06-15T10:07:00Z", origin=None):
+    evt = {"type": "user", "timestamp": ts, "promptSource": "system",
+           "message": {"role": "user", "content": text}}
+    if origin is not None:
+        evt["origin"] = origin
+    return evt
+
+
+def test_count_user_messages_counts_system_sourced_prompts(tmp_path, monkeypatch):
+    # A cron/loop-driven session is made almost entirely of these. Skipping
+    # them would leave _count_user_messages()==0 forever → no auto-title.
+    p = tmp_path / "s10.jsonl"
+    _write(p, [
+        _system_prompt("[Auto-check Zigbee] Sprawdź, czy trzy poprawki działają"),
+        _system_prompt("Goal set: dokończ refactor", origin={"kind": "auto-continuation"}),
+        _peer_user(),
+        _task_notification(),
+    ])
+    _use_transcript(monkeypatch, p)
+    assert titles._count_user_messages("s10") == 2
+
+
+def test_build_excerpt_keeps_system_sourced_prompts(tmp_path, monkeypatch):
+    p = tmp_path / "s11.jsonl"
+    _write(p, [
+        _system_prompt("[Auto-check Zigbee] Sprawdź trzy poprawki"),
+        _system_prompt("Goal set: dokończ refactor", origin={"kind": "auto-continuation"}),
+        _peer_user(body="PEER-BODY-SHOULD-NOT-APPEAR"),
+    ])
+    _use_transcript(monkeypatch, p)
+    excerpt = titles._build_excerpt("s11")
+    assert "Auto-check Zigbee" in excerpt
+    assert "Goal set: dokończ refactor" in excerpt
+    assert "PEER-BODY-SHOULD-NOT-APPEAR" not in excerpt
 
 
 # ── resolve_title: precedence ─────────────────────────────────────────────

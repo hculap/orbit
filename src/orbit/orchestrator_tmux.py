@@ -380,6 +380,7 @@ def build_spawn_cmd(
     add_dirs: list[Path] | None = None,
     model: str | None = None,
     env_extra: dict[str, str] | None = None,
+    worktree: str | None = None,
 ) -> list[str]:
     """Compose ``tmux new-session ... claude --session-id ...`` argv.
 
@@ -389,7 +390,18 @@ def build_spawn_cmd(
 
     Defensive: rejects ``--bare`` because it forces API billing — never
     accidentally emit it from this codepath.
+
+    ``worktree`` emits ``--worktree=<name>`` so claude creates/enters its own
+    git worktree for this session. COLD SPAWN ONLY — re-passing it on an
+    existing worktree can ``git reset --hard`` the branch back to the base ref.
+    See ``orchestrator_worktree.resolve_spawn_target``, which is the only thing
+    that should be deciding this.
     """
+    # A missing cwd makes `tmux new-session -c` fail opaquely: the pane dies
+    # and the caller reports the generic 60 s "claude REPL never became ready".
+    # Checking here names the actual problem. Cheap (one stat per cold spawn).
+    if not Path(cwd).is_dir():
+        raise ValueError(f"refusing to spawn: cwd does not exist or is not a directory: {cwd}")
     # `env TERM=xterm-256color` prepended because tmux silently overrides our
     # outer `-e TERM=xterm-256color` with the server-wide `default-terminal`
     # setting from the user's ~/.tmux.conf (commonly `screen-256color`).
@@ -426,6 +438,21 @@ def build_spawn_cmd(
         "--add-dir",
         str(_CLAUDE_HOME),
     ]
+    # Per-session git worktree. Emitted as ONE token (`--worktree=<name>`)
+    # rather than two so a hostile/odd name can never sit at an argv boundary
+    # where it would be parsed as a flag in its own right. The name is
+    # re-validated here even though the caller sanitizes — this is the last
+    # point before it becomes argv.
+    if worktree is not None:
+        from . import orchestrator_worktree as _worktree_mod
+
+        name = _worktree_mod.sanitize_name(worktree)
+        if name != (worktree or "").strip():
+            # sanitize_name() generates a name for blank input; silently
+            # spawning a DIFFERENT worktree than the sidecar records would
+            # desync the transcript slug. Callers must pass a resolved name.
+            raise ValueError(f"worktree name must be pre-resolved, got {worktree!r}")
+        inner_parts.append(f"--worktree={name}")
     for extra in add_dirs or []:
         extra_path = Path(extra)
         if extra_path.is_dir():
@@ -446,11 +473,16 @@ def build_spawn_cmd(
     # Billing guard: the interactive (subscription) path must NEVER carry a
     # flag that forces programmatic / API billing. A hard raise (not assert —
     # asserts are stripped under `python -O`) for this billing-critical check.
-    for _flag in ("--bare", "-p", "--print"):
+    # `--tmux` is not a billing flag but belongs in the same refuse-list: it
+    # forks a NESTED tmux server on the DEFAULT socket, colliding with the
+    # user's own long-running `orchestrator` server (exactly what `-L hd-orch`
+    # exists to prevent). It only became reachable once `--worktree` landed.
+    for _flag in ("--bare", "-p", "--print", "--tmux"):
         if _flag in inner_parts:
             raise ValueError(
                 f"refusing to spawn interactive claude with {_flag!r} "
-                f"(forces API / programmatic billing); inner argv={inner_parts!r}"
+                f"(forces API / programmatic billing, or forks a nested tmux); "
+                f"inner argv={inner_parts!r}"
             )
 
     outer: list[str] = [
@@ -1224,6 +1256,7 @@ class TmuxPool:
         resume: bool = False,
         model: str | None = None,
         env_extra: dict[str, str] | None = None,
+        worktree: str | None = None,
         wait_ready: bool = True,
     ) -> TmuxSlot:
         """Return a slot for ``session_id``, spawning if needed.
@@ -1273,6 +1306,19 @@ class TmuxPool:
                     # isn't churned.
                     if existing.cwd == Path.home() and cwd != Path.home():
                         existing.cwd = cwd
+                    elif existing.cwd != cwd and cwd != Path.home():
+                        # A live REPL cannot change directory, so this means
+                        # the caller's idea of the session's dir has drifted
+                        # from the running pane's — most plausibly a worktree
+                        # attached/removed while the slot was warm. Do NOT
+                        # respawn to "fix" it: that would drop the session's
+                        # in-memory context. Surface it and let the operator
+                        # close the session to pick up the new dir.
+                        print(
+                            f"[tmux-pool] warm slot {session_id} runs in "
+                            f"{existing.cwd} but caller asked for {cwd}; "
+                            f"keeping the live pane (close the session to respawn)"
+                        )
                     self._slots.pop(session_id)
                     self._slots[session_id] = existing
                     self._mark_cooldowns_locked()
@@ -1302,9 +1348,12 @@ class TmuxPool:
             # Forward every spawn-controlling kwarg — `resume` (added in
             # 6389a58) decides between `--resume <id>` and `--session-id <id>`
             # (claude aborts with "Session ID already in use" if the wrong
-            # one is sent for an existing JSONL), and `model` (added in
-            # 9683643) emits `--model <alias>`. Both were missed when this
-            # fallback path was written in 069b83f. Caught by code review.
+            # one is sent for an existing JSONL), `model` (added in
+            # 9683643) emits `--model <alias>`, and `worktree` emits
+            # `--worktree=<name>` (dropping it would spawn in the REPO ROOT
+            # while the sidecar claims the session is isolated). The first two
+            # were missed when this fallback path was written in 069b83f.
+            # Caught by code review; each has a dedicated regression test.
             return await self.acquire(
                 session_id=session_id,
                 cwd=cwd,
@@ -1313,6 +1362,7 @@ class TmuxPool:
                 resume=resume,
                 model=model,
                 env_extra=env_extra,
+                worktree=worktree,
                 wait_ready=wait_ready,
             )
 
@@ -1356,6 +1406,7 @@ class TmuxPool:
                         resume=resume,
                         model=model,
                         env_extra=env_extra,
+                        worktree=worktree,
                     )
                     await self._runner.spawn(session_name, cmd)
 

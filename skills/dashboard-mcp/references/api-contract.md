@@ -33,8 +33,58 @@ to supply that answer** — it is typed into the pane (see the tmux control plan
 ## Search / introspection
 - `GET /sessions/search?q=&limit=<1..100>&cwd=` → `{ok,mode:"hybrid"|"lexical",results:[{session_id,score,title,updated_at,snippet,matched_terms}]}`
 - `GET /capabilities` → feature flags + limits · `GET /turns/running` → `{running:[{session_id,started_at,runner}]}` (dashboard-dispatched turns only) · `GET /pool` → tmux slots
-- `GET /sessions/{id}/events` (SSE, persistent): `turn_started|turn_done|turn_error|artifact_*|speak`. Build "notify on reply" on `turn_done`/`turn_error`.
+- `GET /sessions/{id}/events` (SSE, persistent): `turn_started|turn_done|turn_error|artifact_*|speak|geo_request|geo_cancelled`. Build "notify on reply" on `turn_done`/`turn_error`.
 - `GET /sessions/{id}/pane` (SSE) → `event: pane_snapshot, data:{text}` — a socket-independent HTTP pane read (alternative to `tmux capture-pane`).
+
+## Geolocation (`/api/orchestrator/geo/*`)
+
+Auth is **asymmetric**: agent→server routes need `X-Geo-Token:` = the contents of
+`~/.orchestrator/artifact_token` (`HD_ARTIFACT_TOKEN_FILE`), compared with
+`hmac.compare_digest`, failing closed → **403** `invalid geo token`. Browser→server
+routes (`answer`, `pending`, `forget`) are un-gated; the 128-bit `request_id`,
+which only ever travels over that session's own SSE, is the capability. Every
+agent-facing route also re-reads the `geolocation_enabled` flag **per request**
+(no restart to toggle) → **403** `geolocation disabled — Ustawienia → Serwer`.
+
+| Method | Path | Token | Body / Query → Response |
+|---|---|:-:|---|
+| POST | `/geo/request` | ✅ | `{session_id, reason?, accuracy?:fine\|coarse, max_age_s?=300, ttl_s?=180}` → `cached` \| `no_browser` \| `rate_limited` \| `pending{request_id,expires_at_ms,targets_n}`. **429** at `GEO_MAX_PENDING=16` |
+| GET | `/geo/requests/{rid}/wait?timeout=45` | ✅ | → a terminal payload, or `{"ok":true,"status":"timeout","terminal":false}`. **429** at `GEO_WAIT_MAX_CONCURRENT=8` |
+| DELETE | `/geo/requests/{rid}` | ✅ | → `{ok,cancelled,status}` — idempotent |
+| GET | `/geo/status?session_id=` | ✅ | → `{ok,enabled,geocode_enabled,browser_attached,browsers_n,last_fix_age_s,pending_n,wait_inflight}` (side-effect free preflight) |
+| GET | `/geo/last` | ✅ | the cached fix, READ-ONLY (never registers an ask, never prompts) → a `cached` payload, or `{ok:true,cached:false,fix:null}` |
+| POST | `/geo/reverse` | ✅ | `{lat,lon}` → `{ok,status:"ok",cached,address:{display_name,road,house_number,city,postcode,country,raw}}` |
+| POST | `/geo/nearby` | ✅ | `{lat,lon,query,radius_m?=1500,limit?=8}` → `{ok,status:"ok",query,radius_m,source:"overpass"\|"nominatim",tag,cached,places:[{name,kind,lat,lon,distance_m,tags}]}` |
+| POST | `/geo/requests/{rid}/answer` | ❌ | the browser's `{status,reason?,coords?,ts_ms?}` → `{ok,accepted,status}`. 404 unknown rid; with the flag off `{ok:true,accepted:false,status:"disabled"}` (a body, so a stale tab stops instead of retrying) |
+| GET | `/geo/requests/pending?session_id=` | ❌ | the SSE-reconnect guarantee → `{ok,requests:[…]}`; an EMPTY list with the flag off |
+| POST | `/geo/forget` | ❌ | → `{ok,forgotten}`; also clears the geocode caches |
+
+**`terminal` is the discriminator, not `status`.** `/wait` uses the wire name
+`timeout` for BOTH the poll window elapsing (`ok:true, terminal:false,
+reason:"poll_window_elapsed"` — re-poll the same rid) and the browser's own
+20 s geolocation timeout (`ok:false, terminal:true`). **Re-poll iff
+`terminal is false`;** anything else is final.
+
+Timeout ladder (do not let these drift): browser 20 s < `/wait` poll 45 s
+(server clamp 60) < request TTL 180 s == the MCP's `overall_timeout`. A resolved
+request is retained 120 s (`GEO_RESULT_GRACE_S`) so an answer that lands *before*
+`/wait` is issued — the common case — is not lost.
+
+Every payload carries `{ok,status,terminal,reason,retryable,message,hint}` from
+the server's single `STATUSES` table (18 rows: `fixed cached pending denied
+device_opt_out dismissed insecure_context no_api unavailable timeout expired
+aborted no_browser not_found rate_limited disabled geocode_disabled
+geocode_failed`). `message`/`hint` are Polish, written for the user.
+
+Geocoding sits behind a **second** flag (`geolocation_geocode_enabled`); off
+returns **HTTP 200** `{"ok":false,"status":"geocode_disabled"}` — a body, not a
+403 — so a caller degrades to raw lat/lon instead of erroring. Fixes live in
+process memory only (nothing on disk), but the coordinates do reach public OSM
+servers when geocoding is on.
+
+SSE (on the existing `GET /sessions/{id}/events`): `geo_request`
+`{request_id,reason,accuracy,max_age_s,ttl_s,expires_at_ms,agent:{lib_id,title}}`
+and `geo_cancelled` `{request_id, reason:"answered_elsewhere"|"expired"|"aborted"}`.
 
 ## tmux control plane (the interactive layer)
 - Socket: **`-L hd-orch`** (dedicated; not the default socket). Session name: **`hd-<session_id>`**, target `hd-<id>:0.0`.

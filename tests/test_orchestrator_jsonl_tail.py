@@ -397,3 +397,42 @@ def test_tail_ignores_stop_hook_before_any_user_line(tmp_path):
 
     user_lines = [l for l in lines if l.get("type") == "user"]
     assert len(user_lines) == 1  # we waited until OUR user line appeared
+
+
+# ── slug parity with claude-cli / teleport ─────────────────────────
+
+
+def test_slug_for_cwd_agrees_with_the_teleport_implementation():
+    """Two slug implementations existed and agreed only by accident.
+
+    ``orchestrator_teleport.cwd_to_slug`` has always used claude's real rule
+    (every non-alphanumeric → ``-``); this one used to substitute only ``/``,
+    ``_`` and ``.``. They match for every path shape in use today, but diverge
+    on e.g. ``+`` — which claude produces on disk when a worktree name contains
+    a slash. Keeping one rule removes the landmine.
+    """
+    from orbit import orchestrator_jsonl_tail as tail_mod
+    from orbit import orchestrator_teleport as teleport_mod
+
+    for path in (
+        "/home/testuser",
+        "/home/testuser/Projects/orbit",
+        "/home/testuser/Projects/my_proj.v2",
+        "/home/testuser/Projects/x/.claude/worktrees/feat-1",
+        "/home/testuser/Projects/x/.claude/worktrees/feat+x",
+        "/home/testuser/Projects/a b/c@d",
+    ):
+        assert tail_mod.slug_for_cwd(path) == teleport_mod.cwd_to_slug(path), path
+
+
+def test_slug_for_cwd_matches_the_real_worktree_layout():
+    """Pinned from a real claude 2.1.220 run: this exact directory is what
+    claude created under ~/.claude/projects for a `--worktree=probe1` session."""
+    from orbit import orchestrator_jsonl_tail as tail_mod
+
+    assert (
+        tail_mod.slug_for_cwd(
+            "/home/testuser/Projects/orbit/.claude/worktrees/probe1"
+        )
+        == "-home-testuser-Projects-orbit--claude-worktrees-probe1"
+    )

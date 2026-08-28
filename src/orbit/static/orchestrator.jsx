@@ -324,7 +324,7 @@ function HeaderActionsCompact(props) {
     pinnedTurnIdxs, pinPopoverOpen, setPinPopoverOpen, messages, msgKey, togglePin,
     sessionId, onModelChange,
     onOpenConversation, conversationSupported,
-    viewMode, onToggleViewMode, onShowGallery, onOpenIssues,
+    viewMode, onToggleViewMode, onShowGallery, galleryOpen, onOpenIssues, issuesOpen,
     onOpenDrawer,
   } = props;
   const pinned = !!(activeSession && activeSession.pinned);
@@ -392,11 +392,13 @@ function HeaderActionsCompact(props) {
     },
     activeSession && { icon: 'pencil', label: 'Rename', onClick: onRename },
     typeof onOpenIssues === 'function' && {
-      icon: 'circle', label: 'Issues projektu / area', onClick: onOpenIssues,
+      icon: 'circle',
+      label: issuesOpen ? 'Zamknij Issues' : 'Issues projektu / area',
+      onClick: onOpenIssues,
     },
     sessionId && typeof onShowGallery === 'function' && {
       icon: 'image',
-      label: viewMode === 'gallery' ? 'Zamknij galerię' : 'Galeria artefaktów',
+      label: galleryOpen ? 'Zamknij galerię' : 'Galeria artefaktów',
       onClick: onShowGallery,
     },
     hasPlan && { icon: 'notepad', label: 'Plan', onClick: () => setActiveModal('plan') },
@@ -444,11 +446,10 @@ function HeaderActionsDesktop(props) {
     pinnedTurnIdxs, pinPopoverOpen, setPinPopoverOpen, messages, msgKey, togglePin,
     sessionId, onModelChange,
     onOpenConversation, conversationSupported,
-    viewMode, onToggleViewMode, onShowGallery, onOpenIssues,
+    viewMode, onToggleViewMode, onShowGallery, galleryOpen, onOpenIssues, issuesOpen,
   } = props;
   const pinned = !!(activeSession && activeSession.pinned);
   const persistent = !!(activeSession && activeSession.persistent);
-  const terminalActive = viewMode === 'terminal';
   // SSH host from override.yaml (passed via /api/data → HUB_INITIAL_DATA).
   // Same convention as HeaderActionsCompact: hide the button when no host
   // is configured so non-self-hosted setups don't see a useless action.
@@ -491,14 +492,24 @@ function HeaderActionsDesktop(props) {
           (onTogglePin / onTogglePersistent / onRename / onCloseSession /
           onClear) stay wired through props for the context menu + compact
           (mobile) header. */}
-      {typeof onOpenIssues === 'function' && <IconButton icon="circle" label="Issues projektu / area" size={32} onClick={onOpenIssues} />}
+      {/* Both open a MODAL over the live session (route-backed, see
+          `openOverlay` in OrchestratorView) — never a view swap, never a
+          navigation, so the ttyd attach behind them stays alive. */}
+      {typeof onOpenIssues === 'function' && (
+        <IconButton
+          icon="circle"
+          label={issuesOpen ? 'Zamknij Issues' : 'Issues projektu / area'}
+          size={32}
+          onClick={onOpenIssues}
+          style={{ color: issuesOpen ? 'var(--accent)' : 'var(--fg-2)' }} />
+      )}
       {sessionId && typeof onShowGallery === 'function' && (
         <IconButton
           icon="image"
-          label={viewMode === 'gallery' ? 'Zamknij galerię' : 'Galeria artefaktów'}
+          label={galleryOpen ? 'Zamknij galerię' : 'Galeria artefaktów'}
           size={32}
           onClick={onShowGallery}
-          style={{ color: viewMode === 'gallery' ? 'var(--accent)' : 'var(--fg-2)' }} />
+          style={{ color: galleryOpen ? 'var(--accent)' : 'var(--fg-2)' }} />
       )}
       <IconButton icon="panel-r" label={panelOpen ? 'Hide sessions' : 'Show sessions'} size={32} onClick={onTogglePanel} style={{ color: panelOpen ? 'var(--accent)' : 'var(--fg-2)' }} />
     </div>
@@ -654,9 +665,30 @@ function SessionItem({ s, active, onSelect, poolStatus, thinking, onContextMenu 
         })()}
         {' · ' + relTime(s.updated_at)}
         {s.git_branch && (
+          // A worktree session upgrades this chip IN PLACE (icon + accent
+          // tint) rather than getting a second one — the row already carries
+          // msg · ctx% · relTime · branch and a 280px sidebar has no room.
+          // The backend resolves git_branch from the worktree, so this
+          // already reads `worktree-<name>`.
           <>
             <span style={{ color: 'var(--fg-4)' }}> · </span>
-            <span title={'branch: ' + s.git_branch}>{s.git_branch}</span>
+            {s.worktree_name && (
+              <Icon name="git-branch" size={10} color="var(--accent)"
+                    style={{ verticalAlign: -1, marginRight: 3 }} />
+            )}
+            <span
+              title={s.worktree_name
+                ? `worktree: ${s.worktree_name}${s.worktree_path ? ' · ' + s.worktree_path : ''}`
+                : 'branch: ' + s.git_branch}
+              style={s.worktree_name ? { color: 'var(--accent)' } : undefined}
+            >{s.git_branch}</span>
+          </>
+        )}
+        {s.worktree_missing && (
+          <>
+            <span style={{ color: 'var(--fg-4)' }}> · </span>
+            <span title={`worktree ${s.worktree_path || ''} nie istnieje`}
+                  style={{ color: 'var(--err)' }}>worktree?</span>
           </>
         )}
       </div>
@@ -693,10 +725,12 @@ function useSessionsIndex(sessions, corpusById) {
     if (!MS || !indexKey) return null;
     const idx = new MS({
       idField: 'id',
-      fields: ['title', 'last_user_preview', 'corpus'],
+      fields: ['title', 'last_user_preview', 'corpus', 'worktree_name'],
       storeFields: ['id'],
       searchOptions: {
-        boost: { title: 4, last_user_preview: 2, corpus: 1 },
+        // worktree_name boosted above corpus: spinning up "feature-x" and then
+        // searching "feature-x" to find that session is the natural instinct.
+        boost: { title: 4, last_user_preview: 2, worktree_name: 3, corpus: 1 },
         fuzzy: 0.2, prefix: true, combineWith: 'AND',
       },
     });
@@ -705,6 +739,7 @@ function useSessionsIndex(sessions, corpusById) {
       title: s.title || '',
       last_user_preview: s.last_user_preview || '',
       corpus: (corpusById && corpusById[s.id]) || s.corpus || '',
+      worktree_name: s.worktree_name || '',
     })));
     return idx;
   // sessions / corpusById are intentionally pulled in via closure, but the
@@ -1050,6 +1085,106 @@ function SessionList({
 // ChatTranscript, blockHasContent, messageHasVisibleContent live in
 // orchestrator-transcript.jsx and are published to window.
 
+// ---- Peer messages (agent → agent) -------------------------------------
+// Claude Code's native cross-session messaging lands in this session's JSONL
+// as an inbound entry the backend surfaces as role='peer':
+//   {role:'peer', ts, turn_idx,
+//    peer:{from, from_name, from_pid, msg_id},   // every field optional
+//    blocks:[{kind:'text', text}]}
+// It is neither the human's own input nor this agent's reply, so it must wear
+// neither bubble — see `.peer-msg` in tokens.css for the visual contract.
+//
+// The per-role dispatch itself lives in MessageBubbleImpl
+// (orchestrator-transcript.jsx), which resolves this component off `window` at
+// RENDER time — the same idiom it already uses for window.MessageActionRow —
+// so the load order (transcript before orchestrator) is not a problem.
+
+const _PEER_LABEL_MAX = 60;
+
+function _peerTruncate(s) {
+  return s.length > _PEER_LABEL_MAX ? s.slice(0, _PEER_LABEL_MAX - 1) + '…' : s;
+}
+
+// Everything on `peer` comes straight out of the session JSONL, so nothing is
+// trusted to exist or to have the right type. Prefer the sender's own name,
+// fall back to its pid, then to the socket path, then to a generic label —
+// the header must never render empty.
+function peerSenderLabel(peer) {
+  const p = (peer && typeof peer === 'object') ? peer : {};
+  const name = typeof p.from_name === 'string' ? p.from_name.trim() : '';
+  if (name) return _peerTruncate(name);
+  if (typeof p.from_pid === 'number' && Number.isFinite(p.from_pid)) {
+    return 'sesja #' + p.from_pid;
+  }
+  const from = typeof p.from === 'string' ? p.from.trim() : '';
+  if (from) {
+    // uds:/run/user/1000/cc-socks/3099339.sock → "sesja #3099339"
+    const m = from.match(/(\d+)\.sock$/);
+    if (m) return 'sesja #' + m[1];
+    const tail = from.split('/').filter(Boolean).pop();
+    if (tail) return _peerTruncate('sesja ' + tail);
+  }
+  return 'inna sesja';
+}
+
+// Last-resort body text: used when BlockRenderer isn't available (an old
+// cached page) or when it declines every block. Better a plain paragraph than
+// a silently empty card.
+function peerFallbackText(blocks) {
+  return (Array.isArray(blocks) ? blocks : [])
+    .map(b => {
+      if (!b || typeof b !== 'object') return '';
+      const t = b.text != null ? b.text : (b.content != null ? b.content : '');
+      return String(t);
+    })
+    .filter(s => s.trim())
+    .join('\n\n');
+}
+
+function PeerMessage({ msg, sessionId, onOpenLightbox, msgKey, tightBelow = false }) {
+  const m = msg || {};
+  const peer = m.peer;
+  const blocks = Array.isArray(m.blocks) ? m.blocks : [];
+  const keep = typeof window.blockHasContent === 'function'
+    ? window.blockHasContent
+    : (b) => !!b;
+  const visible = blocks.filter(b => keep(b));
+  const Renderer = window.BlockRenderer;
+  const fallback = peerFallbackText(visible);
+  const key = (typeof msgKey === 'function') ? msgKey(m) : null;
+  // fmtTime is a script-scoped global from orchestrator-transcript.jsx (loaded
+  // just before this file). typeof-guarded so a load-order regression degrades
+  // to "no timestamp" instead of throwing mid-render.
+  const t = typeof fmtTime === 'function' ? fmtTime(m.ts) : '';
+  return (
+    <div id={key ? ('msg-' + key) : undefined}
+      className="fade-in peer-msg"
+      style={{ marginBottom: tightBelow ? 12 : 22 }}>
+      <div className="peer-msg-head mono"
+        title={peer && peer.msg_id ? ('msg ' + peer.msg_id) : undefined}>
+        <Icon name="inbox" size={12} stroke={1.8} />
+        <span className="peer-msg-from">{peerSenderLabel(peer)}</span>
+        <span className="peer-msg-tag">wiadomość od agenta</span>
+        {t && <span className="peer-msg-time">{t}</span>}
+      </div>
+      <div className="peer-msg-body">
+        {visible.length === 0 && (
+          <span className="peer-msg-empty">(pusta wiadomość)</span>
+        )}
+        {visible.length > 0 && Renderer && (
+          visible.map((b, i) => (
+            <Renderer key={i} block={b} sessionId={m.session_id || sessionId}
+              onOpenLightbox={onOpenLightbox} />
+          ))
+        )}
+        {visible.length > 0 && !Renderer && (
+          <div className="peer-msg-text">{fallback}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const SUGGESTIONS = [
   'co działa na serwerze?',
   'czemu nginx wstaje powoli?',
@@ -1132,6 +1267,10 @@ function _LegacyAgentTabs({ groups, activeKey, onSelect, iconFor, compact }) {
 // file); falls back to the legacy presentational strip if that module is absent.
 const AgentTabs = window.AgentTabs || _LegacyAgentTabs;
 
+// Inert stand-in for window.useGeolocationRequests — calls no hooks, so if the
+// module were ever absent the hook count of OrchestratorView stays constant.
+const _GEO_NOOP = () => ({ prompt: null, modal: null, handleRequest: () => {}, handleCancelled: () => {}, busy: false });
+
 function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   const [state, dispatch] = useOrchestratorReducer();
   const [input, setInput] = useState('');
@@ -1145,6 +1284,9 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   const [renameTarget, setRenameTarget] = useState(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
+  // Opt-in "also remove the git worktree" on the delete confirm. Reset every
+  // time the modal opens so it can never carry over to the next session.
+  const [deleteWorktree, setDeleteWorktree] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);  // new-session confirmation
   // Active (warm tmux) sessions across ALL agents — the same pool the mobile
   // "Sesje" switcher walks. Grouped per-agent (window.HubAgentTabs) to drive
@@ -1175,11 +1317,18 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   const toast = useToast();
   useUnreadIndicator({ messages: state.messages, activeId: state.activeId, isActive: !!isActive });
 
-  // Persistent server-push channel (artifact toasts/modals) — its own
-  // EventSource, independent of the turn stream, so an `artifact open` between
-  // turns still pops a modal even after the runner is reaped. window.* is set
-  // at script load (orchestrator-artifacts.jsx loads before this file), so the
-  // hook call count is stable; the noop is dead-code defence.
+  // The geolocation hook is declared BELOW (it needs the server flag, which is
+  // read further down), so its two SSE callbacks route through this ref —
+  // refilled on every render. Hook ORDER stays fixed, which is what React
+  // actually cares about.
+  const geoRef = useRef(null);
+
+  // Persistent server-push channel (artifact toasts/modals + the geolocation
+  // round trip) — its own EventSource, independent of the turn stream, so an
+  // `artifact open` or a `geo_request` between turns still reaches the user
+  // even after the runner is reaped. window.* is set at script load
+  // (orchestrator-artifacts.jsx loads before this file), so the hook call count
+  // is stable; the noop is dead-code defence.
   (window.usePersistentEvents || (() => {}))({
     sessionId: state.activeId,
     onCreated: (a) => {
@@ -1187,6 +1336,8 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
       window.dispatchEvent(new CustomEvent('orchestrator:artifacts-changed'));
     },
     onOpen: (a) => setOpenArtifact(a),
+    onGeoRequest: (p) => { if (geoRef.current) geoRef.current.handleRequest(p); },
+    onGeoCancelled: (p) => { if (geoRef.current) geoRef.current.handleCancelled(p); },
   });
 
   // Browser TTS — settings hook + speech queue. The voiceTurnRef latches the
@@ -1203,6 +1354,20 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   // `(window.useTts || …)()` defence above). The noop fallback is dead-code.
   const _serverSettings = ((window.HubSettings && window.HubSettings.useServerSettings) || (() => ({ cfg: {} })))();
   const readAloudFlag = !!(_serverSettings && _serverSettings.cfg && _serverSettings.cfg.read_aloud_tmux_enabled === true);
+  // Gates only the CREATION UI (the checkbox row). The row chip + header badge
+  // below gate on the session's own worktree_name instead, so flipping this
+  // off never mislabels sessions that already have a worktree.
+  const worktreeFlag = !!(_serverSettings && _serverSettings.cfg && _serverSettings.cfg.worktree_sessions_enabled === true);
+  // Defaults to ON server-side, so an unloaded cfg reads as enabled (`!== false`)
+  // — no ask can arrive before the flag is on anyway, since the create route
+  // 403s. Flag off is the level-1 rollback: the hook queues nothing, so no
+  // modal and no navigator.geolocation call can happen.
+  const geoFlag = !(_serverSettings && _serverSettings.cfg && _serverSettings.cfg.geolocation_enabled === false);
+  // Browser half of the agent→browser geolocation round trip. window.* is set
+  // at script load (orchestrator-geolocation.jsx loads before this file), so the
+  // hook call count is stable; the noop is dead-code defence.
+  const geo = (window.useGeolocationRequests || _GEO_NOOP)({ sessionId: state.activeId, enabled: geoFlag });
+  geoRef.current = geo;
   const voiceMode = ttsSettings && ttsSettings.voiceOutput ? ttsSettings.voiceOutput : 'manual';
   const voiceTurnRef = useRef(false);
   const spokenKeysRef = useRef(new Set());
@@ -1272,13 +1437,6 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
     }
     setViewMode(next);
   }, [viewMode, state.activeId]);
-
-  // Transient artifact-gallery view. NOT persisted to the view-mode map —
-  // toggling off returns to the default terminal view, and a session switch
-  // resets it via the restore effect above.
-  const showGallery = useCallback(() => {
-    setViewMode(m => (m === 'gallery' ? 'terminal' : 'gallery'));
-  }, []);
 
   const onRecordingStart = useCallback(() => {
     // User is speaking — stop the agent from speaking over them.
@@ -1377,18 +1535,6 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   // but the library route's lib_id is the BARE leaf (the section already encodes
   // the kind). Strip it, else buildPath emits /projects/projects/x → 404.
   const _libLeaf = agentLibId ? agentLibId.replace(/^(areas|projects|resources)\//, '') : null;
-  const onOpenIssues = (_libLeaf && _libSection && typeof window.buildPath === 'function')
-    ? () => {
-      const href = window.buildPath({ section: _libSection, detail: { lib_id: _libLeaf }, tab: 'issues' });
-      try {
-        // pushState (not routerReplace) so Back returns to the session.
-        window.history.pushState(null, '', (typeof window.addBase === 'function' ? window.addBase(href) : href));
-        window.dispatchEvent(new Event('router:change'));
-      } catch (_e) {
-        if (typeof window.routerReplace === 'function') window.routerReplace(href);
-      }
-    }
-    : null;
   const agentNameRaw = useMemo(() => {
     if (!_urlSid) return 'Global';
     if (!targetSession) return 'Agents';
@@ -1420,23 +1566,190 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   // look up the matching area/project in useHubData() by lib_id.
   const _hubData = (typeof window !== 'undefined' && typeof window.useHubData === 'function')
     ? window.useHubData() : null;
-  // Resolve a per-agent emoji icon from its lib_id by matching the area/project
-  // in useHubData(). Shared by the header avatar (current agent) and the agent
-  // tab strip (every active agent). '' when there's no lib / no match.
-  const iconForLibId = useCallback((libId) => {
-    if (!libId || !_hubData) return '';
+  // Resolve the whole area/project row behind an orchestrator lib_id
+  // ("projects/x" / "areas/x") from useHubData(). Free — /api/data is
+  // server-rendered into the page (HUB_INITIAL_DATA), not fetched — and it
+  // carries the icon, the user's override.yaml `label` AND has_github_remote
+  // in one lookup. null when there's no lib / no match (hidden or
+  // just-created items are simply absent from the list).
+  const itemForLibId = useCallback((libId) => {
+    if (!libId || !_hubData) return null;
     const m = String(libId).match(/^(areas|projects)\/(.+)$/);
-    if (!m) return '';
+    if (!m) return null;
     const list = m[1] === 'areas' ? (_hubData.areas || []) : (_hubData.projects || []);
     const want = m[2];
-    const hit = list.find((it) => (it.lib_id || it.name) === want);
-    return (hit && hit.icon) ? String(hit.icon) : '';
+    return list.find((it) => it && (it.lib_id === want || it.name === want)) || null;
   }, [_hubData]);
+  // Per-agent emoji icon. Shared by the header avatar (current agent) and the
+  // agent tab strip (every active agent), so it stays a thin, cheap wrapper.
+  const iconForLibId = useCallback((libId) => {
+    const hit = itemForLibId(libId);
+    return (hit && hit.icon) ? String(hit.icon) : '';
+  }, [itemForLibId]);
   const agentIcon = useMemo(() => {
     if (!targetSession) return '';
     if (targetSession.icon && typeof targetSession.icon === 'string') return targetSession.icon;
     return iconForLibId(agentLibId);
   }, [targetSession, agentLibId, iconForLibId]);
+
+  // ── Nakładki nad sesją: galeria artefaktów + Issues ─────────────────────
+  //
+  // Both used to REPLACE the session: the gallery swapped out
+  // <TerminalLiveView> (killing the live ttyd attach) and Issues navigated to
+  // /projects/<x>/issues. They are modals now — the terminal stays mounted and
+  // visible behind the scrim.
+  //
+  // Openness is ROUTE state (/chat/<sid>/gallery|issues), never useState: the
+  // URL is the single source of truth so browser/Android Back closes the modal
+  // and a deep link opens it. Two sources would drift, and the drift only ever
+  // shows up on Back — the exact case we're adding. `route` is driven by
+  // useRouter's popstate listener, so Back needs no listener of our own
+  // (`router:change` alone would NOT hear it — it fires on programmatic
+  // navigation only).
+  const _overlay = (_orchRouter && _orchRouter.route && _orchRouter.route.overlay) || null;
+  // "Did WE push this history entry?" — true means closing can CONSUME it with
+  // history.back() instead of piling up junk; false (a cold deep link, the PWA
+  // lastPath restore) means there is nothing behind it, so close rewrites it
+  // with replace().
+  //
+  // The answer is stamped on the history ENTRY, not held in a ref, because a
+  // ref cannot answer it in the two cases that matter most: a RELOAD wipes it,
+  // and walking Back then FORWARD into the same entry does not restore it. In
+  // both, close() would fall back to replace() and leave two adjacent entries
+  // with the identical URL — after which Back fires popstate, setPath receives
+  // the same string, React bails out of the render and the press does visibly
+  // nothing. history.state survives a reload and rides with the entry through
+  // Back/Forward, which is exactly the lifetime this fact has.
+  const _overlayIsOurs = useCallback(() => {
+    try { return !!(window.history.state && window.history.state.hubOverlay); }
+    catch (_e) { return false; }
+  }, []);
+  // back() is async — the modal closes on the resulting popstate — so a double
+  // click on the X would fire it twice and pop the user clean OUT of the
+  // session. One close per open.
+  const _overlayClosingRef = useRef(false);
+  useEffect(() => {
+    if (_overlay) return;
+    _overlayClosingRef.current = false;
+  }, [_overlay]);
+  // The overlay-free URL we came from — the close target and the drop target
+  // below. Keyed on the URL session id ONLY, never on state.activeId: opening
+  // a modal must not renavigate the session. On a bare /chat with a restored
+  // activeId that means the overlay URL is the session-less /chat/gallery, and
+  // close() is then an exact inverse of open() (which matters — useRouter's
+  // replace early-returns when the target equals the current path).
+  const _overlayBase = useCallback(() => (
+    typeof window.buildPath === 'function'
+      ? window.buildPath({ section: 'orchestrator', sessionId: _urlSid || null })
+      : '/chat'
+  ), [_urlSid]);
+  // `state` is optional and defaults to PRESERVING the current entry's state
+  // (both router helpers do), which is what an overlay→overlay switch wants:
+  // it rewrites the same entry, so its ownership marker still holds.
+  const _overlayReplace = useCallback((href, state) => {
+    if (_orchRouter && typeof _orchRouter.replace === 'function') _orchRouter.replace(href, state);
+    else if (typeof window.routerReplace === 'function') window.routerReplace(href, state);
+  }, [_orchRouter]);
+  // ONE close path — the X, the overlay click, Escape and the header toggle
+  // all funnel through here.
+  const closeOverlay = useCallback(() => {
+    if (!_overlay || _overlayClosingRef.current) return;
+    _overlayClosingRef.current = true;
+    if (_overlayIsOurs()) {
+      try {
+        window.history.back();
+        return;
+      } catch (_e) { /* fall through to replace */ }
+    }
+    // Explicit null: this entry no longer holds an overlay, so it must not
+    // keep claiming ownership of one.
+    _overlayReplace(_overlayBase(), null);
+  }, [_overlay, _overlayBase, _overlayReplace, _overlayIsOurs]);
+  const openOverlay = useCallback((kind) => {
+    // Clicking the header button while ITS modal is open closes it (the old
+    // toggle affordance) — it must never stack a second identical entry.
+    if (_overlay === kind) { closeOverlay(); return; }
+    if (typeof window.buildPath !== 'function') return;
+    const href = window.buildPath({ section: 'orchestrator', sessionId: _urlSid || null, overlay: kind });
+    // Switching from one overlay to the OTHER replaces in place — pushing
+    // would make Back step through a modal the user already left. Whether the
+    // entry is "ours" doesn't change: we're rewriting the same entry.
+    if (_overlay) { _overlayReplace(href); return; }
+    // `{hubOverlay:true}` marks the entry as OURS — see _overlayIsOurs above
+    // for why the mark rides on the history entry instead of a ref.
+    if (_orchRouter && typeof _orchRouter.push === 'function') {
+      // push (not replace) is what makes Back return to the session.
+      _orchRouter.push(href, { hubOverlay: true });
+      return;
+    }
+    try {
+      // addBase: raw pushState works on today's root deploy but drops the
+      // prefix under a subpath, where the next full reload 404s at nginx.
+      window.history.pushState({ hubOverlay: true }, '', (typeof window.addBase === 'function' ? window.addBase(href) : href));
+      window.dispatchEvent(new Event('router:change'));
+    } catch (_e) {
+      _overlayReplace(href);
+    }
+  }, [_overlay, _urlSid, _orchRouter, closeOverlay, _overlayReplace]);
+
+  // "the session list has been fetched at least once" — LOAD_SESSIONS always
+  // replaces the array with a fresh one from the response, so an identity
+  // different from the reducer's INITIAL means the fetch landed (even when it
+  // landed empty). Needed to tell "still resolving" from "will never resolve".
+  const _initialSessionsRef = useRef(state.sessions);
+  const _sessionsFetched = state.sessions !== _initialSessionsRef.current;
+  // On a cold deep link the agent's kind/lib_id aren't known on the first
+  // paint — they come from the URL session's cwd, and state.sessions is still
+  // empty. Wait (spinner) instead of rendering a wrong/empty issue list.
+  const _issuesResolving = !!(_urlSid && !targetSession && !_sessionsFetched);
+  // The session the overlays act on. `state.activeId` is what the body below
+  // actually renders; on a COLD deep link it's still null while hub:open-session
+  // propagates, and the URL id is already correct — so fall back to it rather
+  // than flashing an empty gallery.
+  const _overlaySessionId = state.activeId || _urlSid || null;
+  const _libItem = itemForLibId(agentLibId);
+  // Only a repo with a github remote has an Issues tab at all.
+  // `has_github_remote` rides on the /api/data item (a cheap .git/config grep
+  // server-side). When the item is MISSING from hub data (hidden, created
+  // mid-session, 30 s cache) we can't know — render the button and let the
+  // panel's own error banner speak, rather than hiding it on a false negative.
+  const _hasIssues = !!(_libSection && _libLeaf && (!_libItem || _libItem.has_github_remote));
+  // The library's own title, honouring an override.yaml rename. NOT agentName
+  // — that Title-Cases the slug, so "orbit" would read as "Hetzner
+  // Dashboard" while the library calls it "orbit".
+  const _issuesTitle = (_libItem && (_libItem.label || _libItem.name)) || _libLeaf || agentName;
+  const onOpenIssues = _hasIssues ? () => openOverlay('issues') : null;
+  const showGallery = useCallback(() => openOverlay('gallery'), [openOverlay]);
+
+  // URL normalisation for an overlay that cannot be rendered — a deep link
+  // onto a global/resource agent's Issues, or a gallery with no session at
+  // all. Drop the segment instead of showing a dead modal.
+  //
+  // It funnels through closeOverlay (not a bare replace) so that an entry WE
+  // pushed is CONSUMED with back() — a replace would leave the base URL twice
+  // in a row, and the user's next Back press would then do visibly nothing.
+  // Reachable: on a bare /chat with no sessions at all the gallery button still
+  // pushes /chat/gallery, and this effect is what takes it back down.
+  //
+  // TERMINATION: the effect's first guard is `!_overlay`, and closeOverlay
+  // either back()s to an entry with no overlay segment or replaces with the
+  // overlay-FREE base path — after which route.overlay is undefined and the
+  // guard holds. It cannot re-fire on its own result; the base path is a pure
+  // function of the session id, so the rewrite is idempotent; and closeOverlay's
+  // own _overlayClosingRef makes a second call before the popstate a no-op.
+  useEffect(() => {
+    if (!_overlay) return;
+    if (_overlay === 'issues') {
+      if (_issuesResolving) return;
+      if (_libSection && _libLeaf) return;
+    } else if (_overlay === 'gallery') {
+      if (_overlaySessionId || !_sessionsFetched) return;
+    } else {
+      return;
+    }
+    closeOverlay();
+  }, [_overlay, _issuesResolving, _libSection, _libLeaf, _overlaySessionId, _sessionsFetched, closeOverlay]);
+
   const filteredSessions = useMemo(() => {
     // URL points at a session that hasn't loaded into state.sessions yet
     // (e.g. refresh in flight) — show empty rather than dumping every
@@ -1958,7 +2271,7 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   // Actual session creation — gated behind a confirmation modal (a new
   // tmux REPL is a real cold spawn now that interactive is the default,
   // so a stray + tap shouldn't silently start one).
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(async (opts) => {
     setConfirmNew(false);
     closeStream();
     dispatch({ type: 'CLEAR_STREAMING' });
@@ -1969,11 +2282,26 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
       const payload = { title: null };
       if (agentCwd) payload.cwd = agentCwd;
       if (agentLibId) payload.lib_id = agentLibId;
+      // Worktree keys are added ONLY when the box was ticked, so the default
+      // path posts exactly what it posted before the feature existed (and an
+      // older/rolled-back backend never sees an unknown key).
+      if (opts && opts.worktree) {
+        payload.worktree = true;
+        if (opts.worktreeName) payload.worktree_name = opts.worktreeName;
+      }
       const created = await apiSend('/api/orchestrator/sessions', 'POST', payload);
       await refreshSessions();
       dispatch({ type: 'SELECT_SESSION', id: created.id });
       setSheetOpen(false);
-      toast && toast('New session', 'ok');
+      if (created.worktree_name) {
+        // The response is the ONLY place the user learns a server-generated
+        // (random) worktree name, so it goes in the toast.
+        window.NewSessionModal && window.NewSessionModal.invalidatePreflight(agentCwd);
+        toast && toast('Nowa sesja · worktree ' + created.worktree_name, 'ok');
+        (created.warnings || []).forEach((w) => toast && toast(w, 'warn'));
+      } else {
+        toast && toast('New session', 'ok');
+      }
     } catch (e) { toast && toast('New failed: ' + e.message, 'err'); }
   }, [closeStream, refreshSessions, toast, agentCwd, agentLibId]);
 
@@ -1981,19 +2309,37 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   // createSession does the work on confirm.
   const onNew = useCallback(() => { setConfirmNew(true); }, []);
 
-  // New-session confirm modal has no focusable field, so bind Enter/Esc at
-  // the window level while it's open: Enter confirms (create), Esc cancels.
-  // Capture phase + stopPropagation so the composer textarea's own Enter
-  // handler doesn't also fire and submit a half-typed prompt.
+  // New-session confirm: bind Enter/Esc at the window level while it's open —
+  // Enter confirms (create), Esc cancels. Capture phase + stopPropagation so
+  // the composer textarea BEHIND the modal doesn't also fire and submit a
+  // half-typed prompt (that's the whole reason this is a window listener and
+  // not a modal-local one).
+  //
+  // Since the worktree option landed the modal DOES have focusable controls,
+  // so the listener now yields whenever focus is inside the modal body: the
+  // name field runs its own validate-then-submit on Enter, and the checkbox
+  // gets native activation instead of silently creating a session. Escape
+  // stays unconditional — <Modal> has no Escape handling of its own, so this
+  // is the only way out from inside the field.
+  const submitNewRef = useRef(null);
+  submitNewRef.current = createSession;
   useEffect(() => {
     if (!confirmNew) return undefined;
     const onKey = (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); createSession(); }
-      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setConfirmNew(false); }
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation(); setConfirmNew(false); return;
+      }
+      if (e.key !== 'Enter' || e.shiftKey || e.repeat || e.isComposing || e.keyCode === 229) return;
+      const ae = document.activeElement;
+      if (ae && ae.closest && ae.closest('[data-new-session-body]')) return;
+      e.preventDefault(); e.stopPropagation();
+      // No args: the zero-field Enter path must never pass the event object
+      // through as `opts`.
+      submitNewRef.current && submitNewRef.current();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [confirmNew, createSession]);
+  }, [confirmNew]);
 
   const onRename = useCallback((id) => {
     const target = id || state.activeId;
@@ -2076,6 +2422,8 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   const onDelete = useCallback((id) => {
     const target = id || state.activeId;
     if (!target) return;
+    // Always unticked on open — a destructive opt-in must never be sticky.
+    setDeleteWorktree(false);
     setDeleteTarget(target);
   }, [state.activeId]);
 
@@ -2100,15 +2448,26 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
         })
       : { action: isActive ? 'agents' : 'none' };
     try {
-      await apiSend('/api/orchestrator/sessions/' + encodeURIComponent(target), 'DELETE', null);
+      const res = await apiSend(
+        '/api/orchestrator/sessions/' + encodeURIComponent(target)
+          + (deleteWorktree ? '?worktree=remove' : ''),
+        'DELETE', null,
+      );
       await refreshSessions();
       refreshPool();  // drop the deleted session's tab/dot now, not in ≤8s
       // Only navigate after the delete actually succeeds (closeStream runs
       // inside applyRemovalDecision, so a failed delete leaves the user put).
       applyRemovalDecision(decision);
-      toast && toast('Deleted', 'ok');
+      if (res && res.worktree_removed === false) {
+        // The session is gone but the worktree stayed (dirty tree or a lock).
+        // Surfacing git's reason beats a silent partial success.
+        toast && toast('Sesja usunięta · worktree zostaje: '
+          + (res.worktree_error || 'nieznany powód'), 'warn');
+      } else {
+        toast && toast('Deleted', 'ok');
+      }
     } catch (e) { toast && toast('Delete failed', 'err'); }
-  }, [deleteTarget, state.activeId, state.sessions, poolStatusById, agentCwd,
+  }, [deleteTarget, deleteWorktree, state.activeId, state.sessions, poolStatusById, agentCwd,
       refreshSessions, refreshPool, applyRemovalDecision, toast, fetchPoolStatusMap]);
 
   // Close (X / "Zamknij sesję") — kill the running session + free its pool
@@ -2205,7 +2564,30 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
     // Goes through routerReplace (not raw history.replaceState) so the
     // _writeLastPath bookkeeping fires.
     if (id && typeof window.routerReplace === 'function' && typeof window.buildPath === 'function') {
-      window.routerReplace(window.buildPath({ section: 'orchestrator', sessionId: id }));
+      // KEEP a chat overlay segment (/chat/<sid>/gallery|issues) when the URL
+      // already names THIS session. This replace runs on every cold load — the
+      // hub:open-session replay calls us with `state.activeId` still null, so
+      // the `id === state.activeId` early-return above cannot fire even when
+      // the URL session IS the selected one — and rebuilding the path without
+      // `overlay` silently stripped it about one fetch after first paint: the
+      // modal flashed open and vanished while the address bar rewrote itself,
+      // so every deep link, shared/bookmarked overlay URL and F5-with-modal-
+      // open was dead on arrival.
+      //
+      // Read the overlay from window.location, NOT from the `_overlay` /
+      // `_urlSid` closure vars: this callback is invoked from a `.then()`
+      // captured at mount, where both are stale.
+      //
+      // Switching to a DIFFERENT session still drops it — an overlay scoped to
+      // session A must not survive into session B. The rule itself lives in
+      // HubChatRoute.overlayToCarry so `node --test` can pin it.
+      const cur = typeof window.parseRoute === 'function'
+        ? window.parseRoute(window.location.pathname)
+        : null;
+      const overlay = window.HubChatRoute
+        ? window.HubChatRoute.overlayToCarry(cur, id)
+        : undefined;
+      window.routerReplace(window.buildPath({ section: 'orchestrator', sessionId: id, overlay }));
     }
   }, [state.activeId, closeStream, tts]);
 
@@ -2261,6 +2643,27 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
         window.dispatchEvent(new Event('hub:shortcut-mic'));
         return;
       }
+      // ⌘I / ⌘G toggle the two session overlays. openOverlay() already closes
+      // when the same kind is open, so one binding does both directions, and
+      // pressing the OTHER one while a modal is up swaps it in place.
+      //
+      // ⌘ ONLY — deliberately not ctrl, unlike every other shortcut here.
+      // In a terminal Ctrl+I *is* Tab (0x09) and Ctrl+G *is* BEL (0x07), and
+      // _forwardAppShortcuts swallows whatever it forwards, so binding ctrl
+      // would silently break Tab inside the ttyd pane. Linux/Windows users
+      // reach these through Super, which is also `metaKey`.
+      if (k === 'i' || k === 'I' || k === 'g' || k === 'G') {
+        if (!e.metaKey) return;
+        const kind = (k === 'i' || k === 'I') ? 'issues' : 'gallery';
+        // Issues needs a project/area agent; the gallery needs a session. No
+        // preventDefault when we can't act — the browser keeps ⌘G "find again"
+        // rather than the key doing nothing at all.
+        if (kind === 'issues' && !_hasIssues) return;
+        if (kind === 'gallery' && !_overlaySessionId) return;
+        e.preventDefault();
+        openOverlay(kind);
+        return;
+      }
       // ↑/↓ cycle the CURRENT agent's sessions IN THE SAME ORDER + MEMBERSHIP the
       // sidebar shows them: archived dropped, then partitioned so we walk the
       // VISIBLE rows (open-first → recency; folded ">1 week" rows excluded, but
@@ -2300,7 +2703,8 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [filteredSessions, poolStatusById, agentGroups, currentAgentKey, state.activeId, onSelectSession, onNew]);
+  }, [filteredSessions, poolStatusById, agentGroups, currentAgentKey, state.activeId, onSelectSession, onNew,
+    openOverlay, _hasIssues, _overlaySessionId]);
 
   // Poll the active-session pool so the agent tab strip + Cmd+←/→ have the
   // live per-agent grouping.
@@ -2826,10 +3230,16 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
   // Fired by the gallery's "Skomentuj" via `orchestrator:artifact-reference`
   // (separate component tree, same window-CustomEvent pattern as
   // `orchestrator:artifacts-changed`).
-  const referenceArtifact = useCallback((text) => {
+  // `targetSid` (optional) is the session the CALLER meant. The overlays
+  // know it — they were opened for a specific session — while state.activeId
+  // is re-derived here and lags by a frame straight after a session switch, so
+  // a paste could land in the previous pane. Falling back keeps every existing
+  // caller (the gallery's "Skomentuj") working unchanged.
+  const referenceArtifact = useCallback((text, targetSid) => {
     if (!text) return;
-    const sid = state.activeId;
-    if (!sid) return;
+    const sid = targetSid || state.activeId;
+    // Used to be a silent `return` — which reads as a dead button. Say it.
+    if (!sid) { if (toast) toast('Brak aktywnej sesji — nie ma dokąd wkleić', 'err'); return; }
     let preferChat = false;
     try {
       const map = JSON.parse(localStorage.getItem('hub-orchestrator-view-mode') || '{}');
@@ -2848,7 +3258,16 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
     }
   }, [state.activeId, toast]);
   useEffect(() => {
-    const onRef = (e) => { const t = e && e.detail && e.detail.text; if (t) referenceArtifact(t); };
+    const onRef = (e) => {
+      const t = e && e.detail && e.detail.text;
+      if (!t) return;
+      // "Skomentuj" pastes into the terminal / composer — which now sits
+      // BEHIND the gallery modal, so the user would never see it land. Closing
+      // the overlay reproduces what the old full-screen gallery view did
+      // implicitly (it was replaced by the chat/terminal body).
+      closeOverlay();
+      referenceArtifact(t, (e.detail && e.detail.sessionId) || null);
+    };
     // `insert-input` kept as a back-compat alias for any other caller.
     window.addEventListener('orchestrator:artifact-reference', onRef);
     window.addEventListener('orchestrator:insert-input', onRef);
@@ -2856,7 +3275,7 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
       window.removeEventListener('orchestrator:artifact-reference', onRef);
       window.removeEventListener('orchestrator:insert-input', onRef);
     };
-  }, [referenceArtifact]);
+  }, [referenceArtifact, closeOverlay]);
 
   const _branchSuffix = (activeSession && activeSession.git_branch)
     ? ' · ' + activeSession.git_branch
@@ -2921,6 +3340,30 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
             <StatusDot status={isStreaming ? 'warn' : 'ok'} />
             <span className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-3)' }}>{subtitle}</span>
             <RunnerModeBadge runnerMode={state.lastRunnerMode} />
+            {/* Sits next to RunnerModeBadge — the established "what mode is
+                this session in" slot. Gated on the session's own field, not
+                the server flag, so an L1 rollback keeps labelling correctly. */}
+            {activeSession && activeSession.worktree_name && (
+              <span
+                className="mono"
+                title={activeSession.worktree_missing
+                  ? `worktree ${activeSession.worktree_path || ''} nie istnieje`
+                  : `worktree: ${activeSession.worktree_path || activeSession.worktree_name}`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '2px 8px', borderRadius: 'var(--r-pill)',
+                  fontSize: 'var(--t-2xs)', letterSpacing: '0.06em',
+                  background: 'var(--surface-1)',
+                  border: '1px solid ' + (activeSession.worktree_missing ? 'var(--err-line)' : 'var(--hairline)'),
+                  color: activeSession.worktree_missing ? 'var(--err)' : 'var(--accent)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <Icon name="git-branch" size={10}
+                      color={activeSession.worktree_missing ? 'var(--err)' : 'var(--accent)'} />
+                {activeSession.worktree_name}{activeSession.worktree_missing ? ' · brak' : ''}
+              </span>
+            )}
             {/* Terminal status relocated here from the panel (desktop). */}
             {!compact && viewMode === 'terminal' && terminalStatus && (
               <>
@@ -2966,7 +3409,9 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
         viewMode={viewMode}
         onToggleViewMode={toggleViewMode}
         onShowGallery={showGallery}
+        galleryOpen={_overlay === 'gallery'}
         onOpenIssues={onOpenIssues}
+        issuesOpen={_overlay === 'issues'}
         onOpenDrawer={onOpenDrawer}
       />
     </div>
@@ -3004,11 +3449,12 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
           </div>
         </div>
       )}
-      {viewMode === 'gallery' && window.ArtifactGallery ? (
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-          <window.ArtifactGallery sessionId={state.activeId} scope="session" compact={compact} />
-        </div>
-      ) : viewMode === 'terminal' && state.activeId && window.TerminalLiveView ? (
+      {/* 'gallery' is no longer a view mode — the gallery opens as a modal
+          OVER this body (see sessionOverlay below) so the live ttyd attach is
+          never torn down. Dropping the intermediate state also closes a hole
+          in the terminal→chat transition effect above, which only fires on
+          prev==='terminal' and used to be skipped on terminal→gallery→chat. */}
+      {viewMode === 'terminal' && state.activeId && window.TerminalLiveView ? (
         <window.TerminalLiveView sessionId={state.activeId} compact={compact} keyboardOpen={keyboardOpen} onStatusChange={compact ? undefined : setTerminalStatus} tts={tts} onSpeakLast={onSpeakLastInTerminal} onShowLast={onShowLastInTerminal} featureFlagEnabled={readAloudFlag} isSpeaking={!!(tts && tts.speaking)} conversationActive={!!(conversation && conversation.active)} />
       ) : (
       <ChatTranscript
@@ -3130,7 +3576,19 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
       </div>
     </Modal>
   );
-  const newSessionModal = (
+  // Body lives in orchestrator-new-session-modal.jsx (checkbox + validated
+  // name + preflight). Falls back to the plain confirm if that module didn't
+  // load, so a JSX error there can never make "+" a dead button.
+  const newSessionModal = window.NewSessionModal ? (
+    <window.NewSessionModal
+      open={confirmNew}
+      onClose={() => setConfirmNew(false)}
+      onConfirm={createSession}
+      agentName={agentName}
+      agentCwd={agentCwd}
+      worktreeEnabled={worktreeFlag}
+    />
+  ) : (
     <Modal open={confirmNew} onClose={() => setConfirmNew(false)} title="Nowa sesja">
       <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ fontSize: 'var(--t-md)', color: 'var(--fg-2)', lineHeight: 1.5 }}>
@@ -3138,26 +3596,81 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="ghost" onClick={() => setConfirmNew(false)}>Anuluj</Button>
-          <Button onClick={createSession}>Nowa sesja</Button>
+          <Button onClick={() => createSession()}>Nowa sesja</Button>
         </div>
       </div>
     </Modal>
   );
+  // Galeria artefaktów / Issues — layered OVER the session, never in place of
+  // it. Mounted as a sibling of the chat column (next to the other modals), so
+  // the terminal/transcript underneath is never unmounted. Openness comes from
+  // the route (`_overlay`), so Back closes it and a deep link opens it.
+  const sessionOverlay = window.SessionOverlayModal ? (
+    <window.SessionOverlayModal
+      kind={_overlay}
+      open={!!_overlay}
+      onClose={closeOverlay}
+      sessionId={_overlaySessionId}
+      libKind={_libSection}
+      libId={_libLeaf}
+      title={_overlay !== 'issues'
+        ? 'Artefakty sesji'
+        // While the agent is still resolving there is no honest name to show —
+        // `agentName` would read 'Agents' (its transient label).
+        : (_issuesResolving ? 'Issues' : `Issues — ${_issuesTitle}`)}
+      compact={compact}
+      resolving={_issuesResolving}
+    />
+  ) : null;
   const artifactModal = (openArtifact && window.ArtifactViewerModal) ? (
     <window.ArtifactViewerModal
       artifact={openArtifact}
       scope={{ sessionId: state.activeId }}
       open
       onClose={() => setOpenArtifact(null)}
+      // Escape only while this view is actually on screen. OrchestratorView
+      // stays MOUNTED under `display:none` on every non-chat route (so the SSE
+      // survives), and the agent's `artifact open` push still lands here — React
+      // runs effects normally inside a hidden subtree, so an invisible viewer
+      // would register on the shared Escape stack and become isTop, swallowing
+      // the keypress the user aimed at the overlay they can actually see (e.g.
+      // _GhFullscreen on /projects/<x>/issues). isActive is a dep of Modal's
+      // registration effect, so this pops/re-pushes as the route changes.
+      closeOnEscape={!!isActive}
     />
   ) : null;
-  const deleteTitle = (state.sessions || []).find(s => s.id === deleteTarget)?.title;
+  const deleteSession = (state.sessions || []).find(s => s.id === deleteTarget);
+  const deleteTitle = deleteSession?.title;
   const deleteModal = (
     <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete session">
       <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ fontSize: 'var(--t-md)', color: 'var(--fg-2)', lineHeight: 1.5 }}>
           Delete <strong style={{ color: 'var(--fg)' }}>{deleteTitle || 'this session'}</strong> and its full transcript? This can't be undone.
         </div>
+        {deleteSession?.worktree_name && !deleteSession?.worktree_missing && (
+          // Opt-in, unticked by default: deleting a CHAT must never silently
+          // discard a branch. The server never passes --force, so a worktree
+          // with uncommitted work refuses and is reported back instead.
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={deleteWorktree}
+              onChange={(e) => setDeleteWorktree(e.target.checked)}
+              style={{ width: 18, height: 18, marginTop: 1, flexShrink: 0, accentColor: 'var(--err)' }}
+            />
+            <span style={{ minWidth: 0 }}>
+              <span style={{ fontSize: 'var(--t-md)', color: 'var(--fg)' }}>
+                Usuń też worktree <code>{deleteSession.worktree_name}</code>
+              </span>
+              <span className="mono" style={{
+                display: 'block', fontSize: 'var(--t-xs)', color: 'var(--fg-3)',
+                marginTop: 2, lineHeight: 1.45,
+              }}>
+                Odmówi, jeśli są niezapisane zmiany. Gałąź zostaje.
+              </span>
+            </span>
+          </label>
+        )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="ghost" onClick={() => setDeleteTarget(null)}>Cancel</Button>
           <Button variant="danger" onClick={submitDelete}>Delete</Button>
@@ -3173,7 +3686,18 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
         <BottomSheet open={sheetOpen} onClose={() => setSheetOpen(false)} title="Sessions" height="100%">
           <SessionList {...sessionListProps} onClose={() => setSheetOpen(false)} compact />
         </BottomSheet>
-        {renameModal}{deleteModal}{newSessionModal}{lightbox}{conversationModal}{artifactModal}{lastMsgModal}
+        {/* ORDER IS LOAD-BEARING for the last three. Every Modal backdrop is
+            `position:fixed; zIndex:40`, so these are equal-z siblings in one
+            stacking context and TREE ORDER decides what paints on top.
+            `sessionOverlay` must come BEFORE `artifactModal`: the agent can
+            push `artifact open` over an already-open gallery/Issues overlay
+            (usePersistentEvents keeps running), and the viewer mounts LAST, so
+            it also lands on top of the Escape stack. If it painted underneath
+            the overlay's opaque scrim the user would see nothing happen AND
+            their next Escape would close that invisible modal. Later == higher
+            in both orders now. geo.modal stays last: it is the blocking consent
+            prompt and outranks everything. */}
+        {renameModal}{deleteModal}{newSessionModal}{lightbox}{conversationModal}{sessionOverlay}{artifactModal}{geo.modal}{lastMsgModal}
       </div>
     );
   }
@@ -3186,9 +3710,18 @@ function OrchestratorView({ compact, isActive, onOpenDrawer, keyboardOpen }) {
           <SessionList {...sessionListProps} onClose={() => setPanelOpen(false)} compact={false} />
         </div>
       )}
-      {renameModal}{deleteModal}{newSessionModal}{lightbox}{conversationModal}{artifactModal}{lastMsgModal}
+      {/* sessionOverlay BEFORE artifactModal — tree order is what decides paint
+          order among equal-z-index fixed siblings. See the compact shell above
+          for the full reasoning. */}
+      {renameModal}{deleteModal}{newSessionModal}{lightbox}{conversationModal}{sessionOverlay}{artifactModal}{geo.modal}{lastMsgModal}
     </div>
   );
 }
 
-Object.assign(window, { OrchestratorView, SessionList, normalizeStructuredBlock });
+Object.assign(window, {
+  OrchestratorView, SessionList, normalizeStructuredBlock,
+  // Consumed by MessageBubbleImpl (orchestrator-transcript.jsx) at render time
+  // for role='peer'. peerSenderLabel/peerFallbackText are exported alongside so
+  // any other surface (previews, notifications) labels a peer the same way.
+  PeerMessage, peerSenderLabel, peerFallbackText,
+});

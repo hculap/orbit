@@ -35,6 +35,7 @@ class FakePool:
         # the runner forwards them (regression guard for code-review #1).
         self.last_append_paths: list[Path] | None = None
         self.last_add_dirs: list[Path] | None = None
+        self.last_worktree: str | None = None
         self.prompts: list[tuple[str, str]] = []
         self.released: list[str] = []
 
@@ -48,6 +49,7 @@ class FakePool:
         resume: bool = False,
         model: str | None = None,
         env_extra: dict[str, str] | None = None,
+        worktree: str | None = None,
     ):
         from orbit import orchestrator_tmux as tmux_mod
         self.acquired.append((session_id, cwd))
@@ -56,6 +58,7 @@ class FakePool:
         self.last_resume = resume
         self.last_model = model
         self.last_env_extra = env_extra
+        self.last_worktree = worktree
         return tmux_mod.TmuxSlot(
             session_id=session_id,
             session_name=f"hd-{session_id}",
@@ -138,11 +141,18 @@ def _valid_envelope_text() -> str:
 # ── tail injection ─────────────────────────────────────────────────
 
 
-def _install_tail_fake(monkeypatch, lines: list[dict[str, Any]]):
-    """Patch the runner's tail to return ``lines`` immediately."""
+def _install_tail_fake(monkeypatch, lines: list[dict[str, Any]], recorder: list | None = None):
+    """Patch the runner's tail to return ``lines`` immediately.
+
+    Pass ``recorder`` to capture the paths the runner asked to tail — that's
+    how the worktree tests assert the JSONL anchor is the transcript dir and
+    not the spawn dir.
+    """
     from orbit import orchestrator_runner_tmux as mod
 
     async def fake_tail(path, *, since_byte=0, **kwargs):
+        if recorder is not None:
+            recorder.append(path)
         return lines, since_byte + 1
 
     monkeypatch.setattr(mod, "tail_until_turn_end", fake_tail)
@@ -259,6 +269,108 @@ def test_start_turn_uses_resume_when_jsonl_exists(tmp_path, monkeypatch):
     assert captured.get("resume") is True, (
         f"expected resume=True due to existing JSONL; got {captured.get('resume')!r}"
     )
+
+
+def test_worktree_spawn_cwd_and_transcript_cwd_are_independent(tmp_path, monkeypatch):
+    """The single most important worktree wiring: on a COLD worktree spawn the
+    launch dir and the transcript dir are DIFFERENT directories.
+
+    Verified against claude-cli 2.1.220: `--worktree=<name>` chdirs into the
+    worktree during startup, so the JSONL is written under the WORKTREE's
+    project slug even though claude was launched from the repo root. If the
+    runner anchored the tail on its spawn cwd (as it did before worktrees), a
+    turn that SUCCEEDED would produce no tail bytes and fail 600 s later with
+    "turn timed out waiting for JSONL flush".
+    """
+    from orbit import orchestrator_runner_tmux as mod
+    from orbit import orchestrator_jsonl_tail as tail_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    worktree = repo / ".claude/worktrees/feat-1"
+    worktree.mkdir(parents=True)
+
+    captured: dict = {}
+
+    class _CapturePool(FakePool):
+        async def acquire(self, **kwargs):
+            captured.update(kwargs)
+            return await super().acquire(**kwargs)
+
+    monkeypatch.setattr(tail_mod, "_CLAUDE_HOME", tmp_path / ".claude")
+    tailed: list = []
+    _install_tail_fake(
+        monkeypatch,
+        [_user_line("hi"), _assistant_text_line(_valid_envelope_text()), _stop_hook()],
+        recorder=tailed,
+    )
+
+    runner = mod.TmuxClaudeRunner(
+        session_id="sess-wt",
+        pool=_CapturePool(),
+        cwd=repo,                 # launch dir — where tmux opens the pane
+        transcript_cwd=worktree,  # where claude will actually write the JSONL
+        worktree="feat-1",
+        append_system_prompt_paths=[],
+    )
+    _run(runner.start_turn("hi"))
+
+    assert captured.get("cwd") == repo, "pool must be acquired with the LAUNCH dir"
+    assert captured.get("worktree") == "feat-1", "worktree flag must reach the pool"
+    # The tail must be anchored on the WORKTREE slug, not the launch dir.
+    assert tailed, "tail was never started"
+    assert tailed[0] == tail_mod.jsonl_path_for(worktree, "sess-wt"), (
+        f"tail anchored on the wrong slug: {tailed[0]}"
+    )
+
+
+def test_transcript_cwd_defaults_to_cwd(tmp_path, monkeypatch):
+    """Non-worktree sessions must behave exactly as before."""
+    from orbit import orchestrator_runner_tmux as mod
+
+    runner = mod.TmuxClaudeRunner(
+        session_id="sess-plain", pool=FakePool(), cwd=tmp_path,
+    )
+    assert runner._transcript_cwd == tmp_path
+
+
+def test_worktree_resume_probes_the_transcript_dir_not_the_launch_dir(tmp_path, monkeypatch):
+    """Steady-state worktree session: the JSONL lives under the worktree slug,
+    so the resume probe must look there or we'd send `--session-id` for an
+    existing transcript (claude aborts: "Session ID is already in use")."""
+    from orbit import orchestrator_runner_tmux as mod
+    from orbit import orchestrator_jsonl_tail as tail_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    worktree = repo / ".claude/worktrees/feat-1"
+    worktree.mkdir(parents=True)
+
+    captured: dict = {}
+
+    class _CapturePool(FakePool):
+        async def acquire(self, **kwargs):
+            captured.update(kwargs)
+            return await super().acquire(**kwargs)
+
+    monkeypatch.setattr(tail_mod, "_CLAUDE_HOME", tmp_path / ".claude")
+    jsonl_path = tail_mod.jsonl_path_for(worktree, "sess-wt2")
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path.write_text("{}\n")
+    _install_tail_fake(
+        monkeypatch,
+        [_user_line("hi"), _assistant_text_line(_valid_envelope_text()), _stop_hook()],
+    )
+
+    runner = mod.TmuxClaudeRunner(
+        session_id="sess-wt2",
+        pool=_CapturePool(),
+        cwd=worktree,
+        transcript_cwd=worktree,
+        append_system_prompt_paths=[],
+    )
+    _run(runner.start_turn("hi"))
+    assert captured.get("resume") is True
 
 
 def test_start_turn_no_resume_for_fresh_session(tmp_path, monkeypatch):

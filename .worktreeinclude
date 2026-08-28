@@ -1,0 +1,14 @@
+# Gitignored files copied into a fresh `claude --worktree` checkout.
+#
+# A worktree is a clean checkout of the branch, so nothing gitignored comes
+# along — a worktree session would otherwise start with no local config and
+# fail the moment it tried to run the app. Only files that match a pattern AND
+# are gitignored are copied; tracked files are never duplicated.
+#
+# Big directories do NOT belong here (copying .venv per worktree is slow and
+# wastes disk) — those are symlinked instead, via worktree.symlinkDirectories
+# in .claude/settings.json.
+#
+# Syntax is .gitignore syntax. See https://code.claude.com/docs/en/worktrees
+config/override.yaml
+.env

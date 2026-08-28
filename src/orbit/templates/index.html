@@ -192,7 +192,7 @@
        are tied to the registration regardless of scope, so notifications
        work even though the SW doesn't intercept page fetches. -->
 
-  <!-- Load order: router (URL hook used by app.jsx) → components → audio-bus (cross-subsystem audio mutex; must precede media-player-engine + orchestrator-tts + orchestrator-conversation) → file-preview, logs-view (siblings of sections) → sections → orchestrator-notifications (used by settings-view) → orchestrator-tts (used by settings-view + orchestrator) → orchestrator-shortcuts (HubShortcuts store/helpers for the terminal shortcut editor; used by settings-* + orchestrator-terminal-preview) → settings-primitives (useSettings/useServerSettings + window.HubSettings UI atoms — the settings contract, must load before every settings-* module) → settings-notifications / settings-voice / settings-chat (Czat tab: display prefs + Prompty) / settings-server (per-tab modules) → settings-shortcuts-editor (shortcuts drawer, used by settings-terminal) → settings-terminal → settings-view (tabbed shell; consumes the tab modules — loads last, still publishes window.SettingsView + window.useSettings) → orchestrator-blocks → orchestrator-widgets (sibling of orchestrator-blocks; provides agent-emitted widget renderers used by BlockRenderer) → orchestrator-voice → orchestrator-mic-button → orchestrator-attachments → orchestrator-artifacts (artifact gallery + viewer modal + persistent events channel; reuses widget renderers, used by orchestrator + library-agent-panel) → orchestrator-message-actions (used by transcript) → orchestrator-transcript → orchestrator-stream → orchestrator-unread → orchestrator-pin-popover (used by orchestrator) → orchestrator-state-modals (used by orchestrator) → orchestrator-model-modal (used by orchestrator) → orchestrator-scroll-fab (used by orchestrator) → orchestrator-aec-loopback (used by orchestrator-conversation) → orchestrator-conversation (used by orchestrator) → orchestrator → library-file-tree → library-link-picker → library-md-editor (Phase 2 markdown editor used by library-detail) → library-github-panels (Phase 3 PR/Issue panels used by library-detail) → library-create-modal → library-overview-extras (LinkedItemsPanel / OverviewGitPanel / RecentCommitsPanel mounted by overview-panels) → library-overview-panels (Overview tab body + Gitignore tab + inline file panels, used by library-detail) → library-branch-panel (Branches tab body, mounted by library-detail) → library-agent-panel (Agent tab body, mounted by library-detail; reads window.SessionList from orchestrator.jsx) → library-detail (Phase 2/3 Areas/Projects CRUD; loaded before details.jsx so DetailRouter sees window.LibraryDetail) → details → agents-directory (publishes window.AgentsDirectoryView consumed by app.getSection) → app (mounts) -->
+  <!-- Load order: router (URL hook used by app.jsx) → components → audio-bus (cross-subsystem audio mutex; must precede media-player-engine + orchestrator-tts + orchestrator-conversation) → file-preview, logs-view (siblings of sections) → sections → orchestrator-notifications (used by settings-view) → orchestrator-tts (used by settings-view + orchestrator) → orchestrator-shortcuts (HubShortcuts store/helpers for the terminal shortcut editor; used by settings-* + orchestrator-terminal-preview) → settings-primitives (useSettings/useServerSettings + window.HubSettings UI atoms — the settings contract, must load before every settings-* module) → settings-notifications / settings-voice / settings-chat (Czat tab: display prefs + Prompty) / settings-server (per-tab modules) → settings-shortcuts-editor (shortcuts drawer, used by settings-terminal) → settings-terminal → settings-view (tabbed shell; consumes the tab modules — loads last, still publishes window.SettingsView + window.useSettings) → orchestrator-blocks → orchestrator-widgets (sibling of orchestrator-blocks; provides agent-emitted widget renderers used by BlockRenderer) → orchestrator-voice → orchestrator-mic-button → orchestrator-attachments → orchestrator-artifacts (artifact gallery + viewer modal + persistent events channel; reuses widget renderers, used by orchestrator + library-agent-panel) → orchestrator-geolocation (browser half of the agent→browser geolocation round trip; consumes window.HubGeo from the plain-script geo-consent.js and is fed by the artifacts events channel, so it sits between artifacts and orchestrator) → orchestrator-message-actions (used by transcript) → orchestrator-transcript → orchestrator-stream → orchestrator-unread → orchestrator-pin-popover (used by orchestrator) → orchestrator-state-modals (used by orchestrator) → orchestrator-model-modal (used by orchestrator) → orchestrator-scroll-fab (used by orchestrator) → orchestrator-aec-loopback (used by orchestrator-conversation) → orchestrator-conversation (used by orchestrator) → orchestrator → library-file-tree → library-link-picker → library-md-editor (Phase 2 markdown editor used by library-detail) → library-github-panels (Phase 3 PR/Issue panels used by library-detail) → library-create-modal → library-overview-extras (LinkedItemsPanel / OverviewGitPanel / RecentCommitsPanel mounted by overview-panels) → library-overview-panels (Overview tab body + Gitignore tab + inline file panels, used by library-detail) → library-branch-panel (Branches tab body, mounted by library-detail) → library-agent-panel (Agent tab body, mounted by library-detail; reads window.SessionList from orchestrator.jsx) → library-detail (Phase 2/3 Areas/Projects CRUD; loaded before details.jsx so DetailRouter sees window.LibraryDetail) → details → agents-directory (publishes window.AgentsDirectoryView consumed by app.getSection) → app (mounts) -->
   <!-- hub-clipboard: shared copyText() with iOS-Safari/PWA execCommand fallback
        (window.HubClipboard); plain <script> (not babel) so node --test can
        require it. Zero deps → load earliest; MUST precede every copy consumer
@@ -203,6 +203,29 @@
        plain <script> (not babel) so router.jsx + node --test can both use it.
        MUST load before router.jsx, which calls window.HubShareRoute. -->
   <script src="{{ url_for('static', path='/share-route.js') }}"></script>
+  <!-- chat-route: the /chat/<sid>/gallery|issues overlay segment
+       (window.HubChatRoute) — the artifact gallery + Issues modals are ROUTES
+       so Back closes them and a deep link opens them. Plain <script> (not
+       babel) so router.jsx + node --test can both use it; MUST load before
+       router.jsx, which calls window.HubChatRoute in parseRoute/buildPath. -->
+  <script src="{{ url_for('static', path='/chat-route.js') }}"></script>
+  <!-- overlay-stack: LIFO registry of on-screen overlays (window.HubOverlayStack)
+       so Escape closes only the TOP-MOST one. Every Escape handler here is bound
+       to `window`, so DOM nesting gives no precedence — without the stack a host
+       modal would close out from under the overlay nested inside it. Plain
+       <script> (not babel) so node --test can require it; MUST load before
+       components.jsx (Modal's closeOnEscape) and library-github-panels.jsx. -->
+  <script src="{{ url_for('static', path='/overlay-stack.js') }}"></script>
+  <!-- geo-consent: pure consent ladder + STATUSES mirror + payload shaping for
+       the agent→browser geolocation round trip (window.HubGeo); plain <script>
+       (not babel) so node --test can require it. MUST load before
+       orchestrator-geolocation.jsx and settings-server.jsx. -->
+  <script src="{{ url_for('static', path='/geo-consent.js') }}"></script>
+  <!-- model-context: context-window sizing per model id + the "kontekst NN%"
+       usage descriptor (window.HubModelContext); plain <script> (not babel) so
+       node --test can require it. MUST load before orchestrator-attachments.jsx
+       (composer badge) and orchestrator.jsx (session-list badge). -->
+  <script src="{{ url_for('static', path='/model-context.js') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/router.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/components.jsx') }}"></script>
   <!-- Design system v2 (feature/design-system): the reusable primitive library.
@@ -253,6 +276,12 @@
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-mic-button.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-attachments.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-artifacts.jsx') }}"></script>
+  <!-- orchestrator-geolocation: browser half of the geolocation round trip
+       (window.useGeolocationRequests / useGeoPermission). Consumes window.HubGeo
+       (plain script above) + ConfirmModal/useToast/useSettings; fed by the
+       usePersistentEvents channel in orchestrator-artifacts.jsx (just above) and
+       mounted by orchestrator.jsx, so it must sit between the two. -->
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-geolocation.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-read-aloud.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-voice-prompts.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-message-actions.jsx') }}"></script>
@@ -277,15 +306,39 @@
        (window.HubSessionListOrder). Plain <script> so node --test can require()
        it; MUST load before orchestrator.jsx (SessionList consumes it). -->
   <script src="{{ url_for('static', path='/session-list-order.js') }}"></script>
+  <!-- worktree-name: JSX-free validation for git-worktree names typed in the
+       new-session modal (window.HubWorktreeName). Plain <script> so node --test
+       can require() it; MUST load before orchestrator-new-session-modal.jsx. -->
+  <script src="{{ url_for('static', path='/worktree-name.js') }}"></script>
   <!-- orchestrator-agent-tabs: enhanced agent-tab strip (window.AgentTabs) —
        context menu, DnD reorder, hover-sessions flyout, "+" add-agent modal.
        MUST load before orchestrator.jsx (which resolves window.AgentTabs). -->
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator-agent-tabs.jsx') }}"></script>
+  <!-- orchestrator-new-session-modal: the "Nowa sesja" confirm (window.NewSessionModal)
+       — worktree checkbox + validated name + preflight. Consumes
+       window.HubWorktreeName (above) and the ds-overlays/ds-forms atoms; used by
+       orchestrator.jsx and library-agent-panel.jsx, so it MUST load before both. -->
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-new-session-modal.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/orchestrator.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-file-tree.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-link-picker.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-md-editor.jsx') }}"></script>
+  <!-- issue-search: JSX-free number/title/body matcher for the Issues panel's
+       search box (window.HubIssueSearch). Plain <script> so node --test can
+       require() it; MUST load before library-github-panels.jsx. -->
+  <script src="{{ url_for('static', path='/issue-search.js') }}"></script>
+  <!-- issue-agent-prompt: the two Polish prompts the Issues panel pastes into
+       a live agent session, "Rozwiąż" / "Dopracuj" (window.HubIssuePrompt).
+       Plain <script> so node --test can pin their one-line/length contract;
+       MUST load before library-github-panels.jsx. -->
+  <script src="{{ url_for('static', path='/issue-agent-prompt.js') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-github-panels.jsx') }}"></script>
+  <!-- orchestrator-session-overlays: window.SessionOverlayModal — the artifact
+       gallery / project Issues panels as modals OVER the live session (the ttyd
+       attach stays mounted behind them). Reads window.ArtifactGallery +
+       window.LibraryIssueList at RENDER time, so it must load after
+       library-github-panels.jsx (just above) and before app.jsx mounts. -->
+  <script type="text/babel" src="{{ url_for('static', path='/orchestrator-session-overlays.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-create-modal.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-overview-extras.jsx') }}"></script>
   <script type="text/babel" src="{{ url_for('static', path='/library-overview-panels.jsx') }}"></script>

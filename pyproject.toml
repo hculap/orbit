@@ -1,6 +1,6 @@
 [project]
 name = "orbit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Orbit — a self-hosted, mobile-first personal-server dashboard. PARA + apps auto-discovery, live status, logs, tasks, notifications, and an optional Claude Code orchestrator. Tailscale-only or behind auth."
 requires-python = ">=3.12"
 dependencies = [

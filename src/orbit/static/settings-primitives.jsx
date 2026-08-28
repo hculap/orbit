@@ -31,6 +31,12 @@ const _SETTINGS_DEFAULTS = {
   // user speech during playback.
   voiceConvBargeInThreshold: 0.045,
   voiceConvBargeMinDurationMs: 120,
+  // Geolocation consent for agent asks (orchestrator-geolocation.jsx).
+  // 'auto' = no in-app modal, the browser's own permission sheet is the gate
+  // (a toast still fires on every fix); 'ask' = the ConfirmModal + 15-min
+  // snooze. `geoOptOut` outranks both and answers every ask `device_opt_out`.
+  geoConsentMode: 'auto',
+  geoOptOut: false,
 };
 
 const { useState: _spUseState, useEffect: _spUseEffect, useCallback: _spUseCallback, useRef: _spUseRef } = React;

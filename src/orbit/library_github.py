@@ -369,10 +369,25 @@ async def update_pr_body(path: Path, number: int, body: str) -> dict:
 # ── Issues ──────────────────────────────────────────────────────
 
 
-_ISSUE_LIST_FIELDS = "number,title,state,author,updatedAt,url,labels,comments"
+# `body` rides along on the LIST so the panel's search box can match issue
+# descriptions client-side (one gh call per mount, then instant undebounced
+# filtering — the house idiom, see static/issue-search.js). The list never
+# RENDERS the body; the detail fetch below stays the display source of truth.
+_ISSUE_LIST_FIELDS = "number,title,body,state,author,updatedAt,url,labels,comments"
 _ISSUE_VIEW_FIELDS = (
     "number,title,body,state,author,url,updatedAt,labels,comments,closedAt"
 )
+# Per-body cap, LIST only. GitHub allows 65 536-char bodies, so an uncapped
+# 50-row list is a ~3 MB response on every panel mount and every
+# Open/Closed/All flip (nothing in this chain is cached). The cap exists to
+# bound THAT, not to save bytes on a normal repo — a truncated haystack means
+# a silently missing search hit, which is worse than a fat response. 20 000
+# chars puts the ceiling at ~1 MB while leaving >95% of the body text in this
+# repo searchable (measured: 29 issues, 315 k chars of body, median 12 k, max
+# 25 k — 3 of the 18 open ones lose a tail). A cap of 8 000 was tried first and
+# swallowed 41% of the corpus, which is exactly the failure to avoid.
+# Opening the issue always shows the full body — the detail fetch is uncapped.
+_ISSUE_LIST_BODY_CAP = 20000
 
 
 async def list_issues(
@@ -400,7 +415,28 @@ async def list_issues(
         items = json.loads(out.decode("utf-8") or "[]")
     except json.JSONDecodeError as e:
         return _err(f"could not parse gh output: {e}")
-    return {"ok": True, "items": items}
+    return {"ok": True, "items": [_clip_issue_body(it) for it in items]}
+
+
+def _clip_issue_body(item: dict) -> dict:
+    """Return ``item`` with an over-long ``body`` truncated. Never mutates.
+
+    The cut is SILENT — no "…(obcięte)" marker, no ellipsis, nothing. On the
+    list `body` exists purely as a search haystack (static/issue-search.js
+    lowercases title+body and substring-matches), so any prose spliced into it
+    becomes matchable text the user can never see: typing the ordinary Polish
+    word "obcięte" used to return exactly the three issues whose bodies happen
+    to be long, with nothing on screen explaining the hits and the word absent
+    from the detail view they open. A haystack must contain only haystack.
+    The FACT of the truncation rides out of band on ``body_truncated`` — a
+    field the matcher does not read — so a caller can still surface it.
+    """
+    if not isinstance(item, dict):
+        return item
+    body = item.get("body")
+    if not isinstance(body, str) or len(body) <= _ISSUE_LIST_BODY_CAP:
+        return item
+    return {**item, "body": body[:_ISSUE_LIST_BODY_CAP], "body_truncated": True}
 
 
 async def get_issue(path: Path, number: int) -> dict:

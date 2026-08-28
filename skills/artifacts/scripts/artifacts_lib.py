@@ -46,12 +46,15 @@ from typing import Any
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
 ARTIFACT_TYPES = (
-    "image", "audio", "video", "youtube", "chart", "map", "html", "file",
+    "image", "audio", "video", "youtube", "chart", "map", "html", "file", "doc",
 )
 # Types whose spec is stored INLINE in manifest.extra (src is always null).
 INLINE_TYPES = ("chart", "map", "youtube")
 # Types backed by a copied / written payload file on disk.
 FILE_TYPES = ("image", "audio", "video", "file")
+# Types whose payload is TEXT the agent hands over (raw, a path, or stdin) and
+# that the panel renders for READING rather than downloading.
+TEXT_TYPES = ("doc",)
 
 CHART_TYPES = ("line", "bar", "pie", "doughnut", "scatter")
 
@@ -59,6 +62,9 @@ ID_RE = re.compile(r"^art-[0-9TZ]+-[0-9a-f]{6}$")
 YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 HTML_MAX_BYTES = 200_000
+# Cap for a `doc` payload. Bigger than html (no markup overhead, and a long
+# report is the point) but still small enough to render in the panel at once.
+DOC_MAX_BYTES = 1_000_000
 NOTIFY_TIMEOUT_S = 3
 
 DEFAULT_DASHBOARD_URL = "http://localhost:8766"
@@ -71,6 +77,20 @@ _DEFAULT_EXT = {
     "video": "mp4",
     "file": "bin",
     "html": "html",
+    "doc": "md",
+}
+
+# Extensions a `doc` payload may keep from its source file. Anything else (a
+# .pdf, a .png) is not text and belongs to `file`, so the ext falls back to md.
+_DOC_EXTS = frozenset({
+    "md", "markdown", "txt", "text", "csv", "tsv", "json", "yaml", "yml",
+    "toml", "log", "rst", "org", "ini", "conf", "diff", "patch",
+})
+_DOC_MIME_BY_EXT = {
+    "md": "text/markdown", "markdown": "text/markdown",
+    "csv": "text/csv", "tsv": "text/tab-separated-values",
+    "json": "application/json", "yaml": "application/yaml",
+    "yml": "application/yaml", "toml": "application/toml",
 }
 
 
@@ -559,6 +579,48 @@ def _write_html_payload(art_dir: Path, art_id: str, html_text: str) -> tuple[str
     return dest_name, len(encoded)
 
 
+def _write_doc_payload(
+    art_dir: Path, art_id: str, text: str, source: Path | None,
+) -> tuple[str, str, int]:
+    """Write a `doc` payload to <art_dir>/<id>.<ext>. Returns (src, mime, size).
+
+    The extension (and therefore the mime) comes from the source file when the
+    agent passed a path to a text file; raw text / stdin defaults to markdown,
+    which is how the panel renders it.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) > DOC_MAX_BYTES:
+        raise ArtifactError(
+            f"doc payload is {len(encoded)} bytes > {DOC_MAX_BYTES} max "
+            f"(use --type file for something this big)"
+        )
+    if not encoded.strip():
+        raise ArtifactError("doc payload is empty")
+    ext = "md"
+    if source is not None:
+        candidate = source.suffix.lstrip(".").lower()
+        if candidate in _DOC_EXTS:
+            ext = candidate
+    mime = _DOC_MIME_BY_EXT.get(ext, "text/plain")
+    dest_name = f"{art_id}.{ext}"
+    _atomic_write_bytes(art_dir / dest_name, encoded)
+    return dest_name, mime, len(encoded)
+
+
+def _source_path(inline: str | None, spec_file: str | None) -> Path | None:
+    """The real file a text payload came from, if it came from one at all."""
+    for cand in (spec_file, inline):
+        if cand is None:
+            continue
+        path = Path(cand).expanduser()
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
+
+
 def _payload_paths(art_dir: Path, manifest: dict[str, Any]) -> list[Path]:
     """All on-disk payload files referenced by a manifest (may be empty)."""
     src = manifest.get("src")
@@ -661,6 +723,22 @@ def create(
             manifest["extra"] = validate_map(_parse_json_spec(spec_text))
         # src stays null for inline spec types.
 
+    elif art_type == "doc":
+        source = _source_path(file, spec_file)
+        doc_text = _read_spec_text(file, spec_file, use_stdin)
+        dest_name, resolved_mime, size = _write_doc_payload(
+            art_dir, art_id, doc_text, source,
+        )
+        manifest = {
+            **manifest,
+            "src": dest_name,
+            "mime": resolved_mime,
+            "size": size,
+            # Original name (when there was a file) so downloads and the panel
+            # header show what the agent called it, not art-<id>.<ext>.
+            "extra": {"filename": source.name} if source is not None else {},
+        }
+
     elif art_type == "html":
         html_text = _read_spec_text(file, spec_file, use_stdin)
         dest_name, size = _write_html_payload(art_dir, art_id, html_text)
@@ -685,7 +763,9 @@ def create(
             "src": dest_name,
             "mime": resolved_mime,
             "size": size,
-            "extra": {},
+            # The payload is stored as an opaque art-<id>.<ext>; keep the name
+            # the agent copied FROM so the dashboard can offer it on download.
+            "extra": {"filename": Path(file).expanduser().name},
         }
 
     write_manifest(art_dir, manifest)

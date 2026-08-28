@@ -45,8 +45,15 @@ _HASHTAG_SAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 # styling effort from the publisher.
 _TOPIC_EMOJI = {
     "cron":   "⏰",
+    # Results of runs that went fine, split off from `cron` so the alert
+    # channel stays an alert channel.
+    "cron-out": "📤",
     "agent":  "🤖",
     "chat":   "💬",
+    # `tasks` shipped later than the original four and was missing here, so
+    # every task reminder wore the generic 🔔 — including, once forum routing
+    # landed, the name of its own thread.
+    "tasks":  "✅",
     "system": "🛠️",
 }
 _PRIORITY_PREFIX = {
@@ -80,6 +87,42 @@ def _read_credentials() -> tuple[str | None, str | None]:
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     return (token or None, chat_id or None)
+
+
+def _route_for(topic: str) -> tuple[str | None, int | None]:
+    """Destination chat + forum thread for ``topic``.
+
+    Delegated to :mod:`notify_topics`, which falls back to the plain
+    ``TELEGRAM_CHAT_ID`` whenever no routing is configured — so this stays a
+    no-op for an install that never opens Settings. An import failure must not
+    take notifications down with it: degrade to the legacy single chat.
+    """
+    try:
+        from . import notify_topics  # local import: keeps notify importable alone
+
+        route = notify_topics.resolve(topic)
+        return (route.chat_id, route.thread_id)
+    except Exception as exc:  # noqa: BLE001 — routing is an enhancement, not a dependency
+        _logger.warning("notify: routing unavailable (topic=%s): %s", topic, exc)
+        _, chat_id = _read_credentials()
+        return (chat_id, None)
+
+
+def _is_thread_missing(response: httpx.Response) -> bool:
+    """True when Telegram rejected the send because the forum thread is gone.
+
+    Deleting a topic in the Telegram client leaves its id in our config, and
+    every message to it then 400s. That must not silently swallow a cron
+    failure alert, so the caller retries in the group's General thread.
+    """
+    if response.status_code != 400:
+        return False
+    try:
+        desc = str((response.json() or {}).get("description") or "")
+    except ValueError:
+        desc = response.text or ""
+    lowered = desc.lower()
+    return "thread not found" in lowered or "topic_deleted" in lowered
 
 
 def _format_message(
@@ -230,6 +273,7 @@ async def _send_attachment(
     reply_markup: dict | None,
     silent: bool,
     timeout: float,
+    thread_id: int | None = None,
 ) -> httpx.Response:
     """POST to the right media endpoint. Caller handles the response shape
     (Telegram returns the same envelope as sendMessage)."""
@@ -240,6 +284,10 @@ async def _send_attachment(
         "caption": caption,
         "parse_mode": "HTML",
     }
+    if thread_id is not None:
+        # Multipart form fields are strings — an int here is sent as one anyway
+        # by httpx, but being explicit keeps the payload obvious in a tcpdump.
+        data["message_thread_id"] = str(thread_id)
     if reply_markup is not None:
         # Multipart form expects reply_markup as a JSON-encoded string,
         # not a nested object (different from sendMessage's JSON body).
@@ -311,7 +359,8 @@ async def notify(
     if topic in _disabled_topics():
         return {"ok": False, "topic": topic, "reason": "topic disabled via NOTIFY_DISABLE_TOPICS"}
 
-    token, chat_id = _read_credentials()
+    token, _ = _read_credentials()
+    chat_id, thread_id = _route_for(topic)
     if not token or not chat_id:
         _logger.warning(
             "notify: TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID missing — skipping (topic=%s)",
@@ -337,27 +386,40 @@ async def notify(
     keyboard = _build_inline_keyboard(topic=topic, click=click, actions=actions)
     silent = priority <= 1
 
-    try:
+    async def _post(thread: int | None) -> httpx.Response:
         if attach:
-            response = await _send_attachment(
+            return await _send_attachment(
                 token=token, chat_id=chat_id, caption=text,
                 attach=attach, reply_markup=keyboard,
-                silent=silent, timeout=timeout,
+                silent=silent, timeout=timeout, thread_id=thread,
             )
-        else:
-            body: dict[str, Any] = {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            }
-            if keyboard is not None:
-                body["reply_markup"] = keyboard
-            if silent:
-                body["disable_notification"] = True
-            url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, json=body)
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if thread is not None:
+            body["message_thread_id"] = thread
+        if keyboard is not None:
+            body["reply_markup"] = keyboard
+        if silent:
+            body["disable_notification"] = True
+        url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(url, json=body)
+
+    thread_fallback = False
+    try:
+        response = await _post(thread_id)
+        if thread_id is not None and _is_thread_missing(response):
+            _logger.warning(
+                "notify: forum thread %s gone (topic=%s) — retrying in General; "
+                "re-map the topic in Settings → Powiadomienia",
+                thread_id, topic,
+            )
+            response = await _post(None)
+            thread_fallback = True
     except (FileNotFoundError, ValueError) as exc:
         _logger.warning("notify: attach rejected (topic=%s): %s", topic, exc)
         return {"ok": False, "topic": topic, "reason": f"attach: {exc}"}
@@ -387,7 +449,12 @@ async def notify(
         _logger.warning("notify: telegram error (topic=%s): %s", topic, desc)
         return {"ok": False, "topic": topic, "reason": desc}
     msg_id = (data.get("result") or {}).get("message_id")
-    return {"ok": True, "topic": topic, "message_id": msg_id}
+    envelope = {"ok": True, "topic": topic, "message_id": msg_id}
+    if thread_fallback:
+        # Surfaced (not just logged) so the /api/notify caller and the Settings
+        # test button can say "delivered, but your thread mapping is stale".
+        envelope["thread_fallback"] = True
+    return envelope
 
 
 # ── setup helpers (used by /api/notify/{probe,detect-chat-id,test}) ──
@@ -467,3 +534,204 @@ async def detect_chat_id(*, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
         "ok": False,
         "error": "no recent messages — send /start to the bot first, then click Detect",
     }
+
+
+# ── forum-topic setup (per-topic routing; see notify_topics) ─────────
+
+
+#: Telegram accepts only these six ``icon_color`` values for a forum topic;
+#: anything else is rejected outright. Assigned round-robin so the threads are
+#: visually distinct in the client without asking the user to pick colours.
+_FORUM_ICON_COLORS = (0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F)
+
+#: Topic icon per topic. Telegram draws this NEXT TO the name, so the name
+#: itself stays plain — the same emoji in both renders twice in the tab bar.
+#: These are NOT ``_TOPIC_EMOJI``: topic icons come from a closed set of ~112
+#: emoji (``getForumTopicIconStickers``) which has no ⏰, 🛠 or 📤, so cron,
+#: system and cron-out use the nearest available stand-in.
+_FORUM_ICON_EMOJI = {
+    "cron":     "❗️",   # awarie — no ⏰ in the allowed set
+    "cron-out": "📈",   # wyniki / raporty
+    "agent":    "🤖",
+    "chat":     "💬",
+    "tasks":    "✅",
+    "system":   "💻",   # no 🛠 in the allowed set
+}
+
+_VARIATION_SELECTOR = "️"
+_forum_icon_cache: dict[str, str] | None = None
+
+
+def forum_icon_color(index: int) -> int:
+    return _FORUM_ICON_COLORS[index % len(_FORUM_ICON_COLORS)]
+
+
+def reset_forum_icon_cache() -> None:
+    """Drop the memoized sticker list (tests; the set is static in practice)."""
+    global _forum_icon_cache
+    _forum_icon_cache = None
+
+
+async def forum_icon_id(emoji: str, *, timeout: float = DEFAULT_TIMEOUT_S) -> str | None:
+    """``custom_emoji_id`` for a topic icon, or None if Telegram doesn't offer it.
+
+    Matching ignores U+FE0F: the API returns "❗️" with the variation selector
+    while source literals often lack it, and a literal comparison then misses a
+    perfectly available icon.
+    """
+    global _forum_icon_cache
+    if _forum_icon_cache is None:
+        token, _ = _read_credentials()
+        if not token:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(
+                    f"{TELEGRAM_API_BASE}/bot{token}/getForumTopicIconStickers",
+                )
+            data = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            _logger.warning("notify: forum icon list unavailable: %s", exc)
+            return None
+        if not data.get("ok"):
+            return None
+        _forum_icon_cache = {
+            str(s.get("emoji", "")).replace(_VARIATION_SELECTOR, ""): str(s.get("custom_emoji_id"))
+            for s in (data.get("result") or [])
+            if s.get("emoji") and s.get("custom_emoji_id")
+        }
+    return _forum_icon_cache.get((emoji or "").replace(_VARIATION_SELECTOR, ""))
+
+
+async def create_forum_topic(
+    *,
+    chat_id: str,
+    name: str,
+    icon_color: int | None = None,
+    icon_custom_emoji_id: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> dict:
+    """Create one forum thread in ``chat_id``. Returns ``{ok, thread_id?, error?}``.
+
+    Needed because the Bot API offers **no way to list** existing forum topics —
+    a bot only learns a ``message_thread_id`` from an update it received in that
+    thread. So either the bot creates the threads itself (this call, requiring
+    admin + *Manage Topics*) or the user posts once in each thread and we read
+    the ids back via :func:`discover_forum_topics`.
+    """
+    token, _ = _read_credentials()
+    if not token:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN missing"}
+    body: dict[str, Any] = {"chat_id": chat_id, "name": name[:128]}
+    # An explicit icon wins; the colour is the fallback for topics whose emoji
+    # Telegram does not offer as a topic icon.
+    if icon_custom_emoji_id:
+        body["icon_custom_emoji_id"] = icon_custom_emoji_id
+    elif icon_color is not None:
+        body["icon_color"] = icon_color
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{TELEGRAM_API_BASE}/bot{token}/createForumTopic", json=body,
+            )
+    except (httpx.HTTPError, OSError) as exc:
+        return {"ok": False, "error": f"transport: {exc}"}
+    try:
+        data = response.json()
+    except ValueError:
+        return {"ok": False, "error": f"non-json response (http {response.status_code})"}
+    if not data.get("ok"):
+        return {"ok": False, "error": data.get("description") or f"http {response.status_code}"}
+    result = data.get("result") or {}
+    thread_id = result.get("message_thread_id")
+    if not isinstance(thread_id, int):
+        return {"ok": False, "error": "telegram returned no message_thread_id"}
+    return {"ok": True, "thread_id": thread_id, "name": result.get("name") or name}
+
+
+def _thread_name(msg: dict) -> str | None:
+    """Topic title from either shape Telegram uses.
+
+    A message that CREATED the topic carries ``forum_topic_created`` directly;
+    an ordinary message in the thread carries it on ``reply_to_message`` (the
+    thread's root). Neither is guaranteed — an id with no name is still useful.
+    """
+    for holder in (msg, msg.get("reply_to_message") or {}):
+        created = holder.get("forum_topic_created")
+        if isinstance(created, dict) and created.get("name"):
+            return str(created["name"])
+    return None
+
+
+async def discover_forum_topics(*, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+    """Scan ``getUpdates`` for forum threads the bot has seen.
+
+    Returns ``{ok, groups: [{chat_id, title, threads: [{thread_id, name?}]}]}``.
+    Telegram keeps unacknowledged updates ~24 h, so this only sees threads
+    posted in recently — the reason the Settings flow prefers creating the
+    topics over discovering them.
+    """
+    token, _ = _read_credentials()
+    if not token:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN missing", "groups": []}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{TELEGRAM_API_BASE}/bot{token}/getUpdates")
+    except (httpx.HTTPError, OSError) as exc:
+        return {"ok": False, "error": f"transport: {exc}", "groups": []}
+    try:
+        data = response.json()
+    except ValueError:
+        return {"ok": False, "error": "non-json response from telegram", "groups": []}
+    if not data.get("ok"):
+        return {
+            "ok": False,
+            "error": data.get("description") or "telegram api ok=false",
+            "groups": [],
+        }
+
+    groups: dict[str, dict[str, Any]] = {}
+    for update in data.get("result") or []:
+        msg = update.get("message") or update.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None or chat.get("type") not in ("supergroup", "group"):
+            continue
+        key = str(chat_id)
+        group = groups.setdefault(key, {
+            "chat_id": key,
+            "title": chat.get("title"),
+            "is_forum": bool(chat.get("is_forum")),
+            "threads": {},
+        })
+        group["is_forum"] = group["is_forum"] or bool(chat.get("is_forum"))
+        thread_id = msg.get("message_thread_id")
+        if isinstance(thread_id, int):
+            name = _thread_name(msg)
+            # Later updates win only when they actually carry a name — an
+            # ordinary message must not blank a title we already learned.
+            if name or thread_id not in group["threads"]:
+                group["threads"][thread_id] = name
+
+    out = [
+        {
+            "chat_id": g["chat_id"],
+            "title": g["title"],
+            "is_forum": g["is_forum"],
+            "threads": [
+                {"thread_id": tid, "name": name}
+                for tid, name in sorted(g["threads"].items())
+            ],
+        }
+        for g in groups.values()
+    ]
+    if not out:
+        return {
+            "ok": False,
+            "groups": [],
+            "error": (
+                "brak świeżych update'ów — napisz cokolwiek w każdym wątku grupy "
+                "(bot musi być jej członkiem), potem kliknij ponownie"
+            ),
+        }
+    return {"ok": True, "groups": out}

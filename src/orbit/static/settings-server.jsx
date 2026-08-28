@@ -23,6 +23,8 @@ const {
   NumberField: _ssNumberField,
   SettingGroup: _ssSettingGroup,
   AdvancedDisclosure: _ssAdvancedDisclosure,
+  StatusBanner: _ssStatusBanner,
+  _useToast: _ssUseToast,
 } = _SS;
 
 // Shared runner-mode option labels — billing-relevant copy, reused by every
@@ -192,6 +194,136 @@ function _ssTeleportCard() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// Geolocation — the per-DEVICE half (the server flags live in the group
+// above). This tab body is not handed the shell's `useSettings` instance, so
+// it opens its own: the store syncs every live instance through the
+// `hub:settings-change` window event, which is exactly the documented contract
+// external consumers (orchestrator-unread / -conversation) already rely on.
+// ─────────────────────────────────────────────────────────────
+const _SS_GEO_MODES = [
+  { value: 'auto', label: 'Automatycznie' },
+  { value: 'ask', label: 'Pytaj za każdym razem' },
+];
+
+const _SS_PERMISSION_LABEL = {
+  granted: 'Udzielone — przeglądarka nie zapyta ponownie.',
+  denied: 'Zablokowane w przeglądarce — każda prośba dostanie odmowę.',
+  prompt: 'Przeglądarka zapyta przy pierwszej prośbie.',
+};
+
+// Native button (window.Button forwards neither `disabled` nor a busy guard),
+// styled like the Kopiuj button above.
+function _ssActionButton({ children, onClick, disabled, icon }) {
+  return (
+    <button
+      type="button"
+      onClick={() => { if (!disabled && onClick) onClick(); }}
+      disabled={!!disabled}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 12px',
+        borderRadius: 'var(--r-control)', border: '1px solid var(--hairline)',
+        background: 'var(--surface-1)', color: 'var(--fg)', fontSize: 'var(--t-sm)',
+        fontFamily: 'inherit', whiteSpace: 'nowrap',
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1,
+      }}>
+      {icon && window.Icon ? <window.Icon name={icon} size={14} /> : null}
+      {children}
+    </button>
+  );
+}
+
+function _ssGeoDeviceGroup() {
+  const [settings, updateSettings] = window.useSettings();
+  const permission = (window.useGeoPermission || (() => null))();
+  const [forgetting, setForgetting] = _ssUseState(false);
+  const toast = _ssUseToast();
+  const optOut = settings.geoOptOut === true;
+  // `window.isSecureContext` is false only on a plain-http origin (localhost
+  // counts as secure), i.e. exactly when the API is unavailable — so this
+  // banner names the URL that works instead of leaving a dead toggle.
+  const insecure = typeof window !== 'undefined' && window.isSecureContext === false;
+
+  const forget = _ssUseCallback(() => {
+    setForgetting(true);
+    fetch(window.apiUrl('/api/orchestrator/geo/forget'), { method: 'POST' })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then(() => { if (toast) toast('Zapomniano ostatnią lokalizację', 'ok'); })
+      .catch(() => { if (toast) toast('Nie udało się wyczyścić lokalizacji', 'err'); })
+      .then(() => setForgetting(false));
+  }, [toast]);
+
+  // Opting out is a per-DEVICE setting, but the server keeps one fix in memory
+  // for 15 minutes and hands it to the next agent from cache — no browser, no
+  // consent, no toast. So the switch also drops it; anything else would leave
+  // the user's coordinates readable by the very thing they just switched off.
+  const setOptOut = _ssUseCallback((value) => {
+    updateSettings({ geoOptOut: value });
+    if (value) {
+      fetch(window.apiUrl('/api/orchestrator/geo/forget'), { method: 'POST' })
+        .catch(() => { /* offline: the fix dies with the process anyway */ });
+    }
+  }, [updateSettings]);
+
+  return (
+    <_ssSettingGroup
+      scope="device"
+      title="Lokalizacja (to urządzenie)"
+      desc="Agent może poprosić TĘ przeglądarkę o lokalizację. Współrzędne żyją wyłącznie w pamięci serwera — nic nie trafia na dysk (choć agent może je zacytować w transkrypcie).">
+
+      {insecure && (
+        <_ssStatusBanner
+          variant="warn"
+          inline
+          label="Ta strona działa po http:// — przeglądarka blokuje geolokalizację."
+          sub="Otwórz https://your-dashboard.example/, żeby prośby agenta mogły się udać."
+        />
+      )}
+
+      <_ssSettingCard>
+        <_ssFieldRow
+          label="Zgoda na prośby o lokalizację"
+          desc="Automatycznie: bez okna w aplikacji — pyta sama przeglądarka (raz na domenę), a każde pobranie pokazuje powiadomienie z linkiem „Wyłącz”. Pytaj za każdym razem: dodatkowe potwierdzenie z opcją uśpienia na 15 minut.">
+          <_ssSegmented
+            value={settings.geoConsentMode === 'ask' ? 'ask' : 'auto'}
+            options={_SS_GEO_MODES}
+            onChange={(v) => updateSettings({ geoConsentMode: v })}
+            disabled={optOut}
+          />
+        </_ssFieldRow>
+      </_ssSettingCard>
+
+      <_ssToggleRow
+        label="Nie udostępniaj lokalizacji z tego urządzenia"
+        desc="Kill switch urządzenia — każda prośba dostaje natychmiast device_opt_out, bez pytania przeglądarki. Ma pierwszeństwo przed trybem zgody. Włączenie kasuje też ostatnią lokalizację z pamięci serwera."
+        value={optOut}
+        onChange={setOptOut}
+      />
+
+      <_ssSettingCard>
+        <_ssSettingRow
+          label="Uprawnienie przeglądarki"
+          desc={_SS_PERMISSION_LABEL[permission] || 'Nieznane — ta przeglądarka nie udostępnia Permissions API (np. Safari).'}
+          control={
+            <span className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-3)' }}>
+              {permission || 'brak danych'}
+            </span>
+          }
+        />
+        <_ssSettingRow
+          label="Ostatnia znana lokalizacja"
+          desc="Serwer trzyma jeden ostatni odczyt w pamięci (15 min), żeby dwie prośby pod rząd nie pytały dwa razy. Czyści też cache adresów OSM."
+          control={
+            <_ssActionButton onClick={forget} disabled={forgetting} icon="trash">
+              {forgetting ? 'Czyszczę…' : 'Zapomnij ostatnią lokalizację'}
+            </_ssActionButton>
+          }
+        />
+      </_ssSettingCard>
+    </_ssSettingGroup>
+  );
+}
+
 function SettingsServer({ server }) {
   // The single server-settings store is owned by the shell and passed in.
   const { cfg = {}, bounds = {}, loaded = false, busy = false, patch = () => {} } = server || {};
@@ -211,6 +343,30 @@ function SettingsServer({ server }) {
           value={cfg.auto_titles !== false}
           onChange={(v) => patch({ auto_titles: v })}
           disabled={dim}
+        />
+
+        <_ssToggleRow
+          label="Sesje w git worktree"
+          desc="Dodaje opcję „Uruchom w worktree” przy tworzeniu sesji — REPL działa wtedy w <repo>/.claude/worktrees/<nazwa> na gałęzi worktree-<nazwa>. Wyłączenie ukrywa opcję; istniejące sesje z worktree działają dalej."
+          value={cfg.worktree_sessions_enabled === true}
+          onChange={(v) => patch({ worktree_sessions_enabled: v })}
+          disabled={dim}
+        />
+
+        <_ssToggleRow
+          label="Geolokalizacja urządzenia"
+          desc="Pozwala agentom prosić Twoją przeglądarkę o lokalizację (navigator.geolocation). Wyłączenie to kill switch: żądania agenta dostają 403, żadne okno się nie pokaże, a współrzędne w pamięci przepadają."
+          value={cfg.geolocation_enabled !== false}
+          onChange={(v) => patch({ geolocation_enabled: v })}
+          disabled={dim}
+        />
+
+        <_ssToggleRow
+          label="Adresy i POI z OpenStreetMap"
+          desc="Zamienia współrzędne na adres (Nominatim) i szuka „co jest najbliżej” (Overpass). ⚠ Współrzędne opuszczają ten serwer do publicznych usług OSM. Wyłączone = agent dostaje surowe lat/lon."
+          value={cfg.geolocation_geocode_enabled !== false}
+          onChange={(v) => patch({ geolocation_geocode_enabled: v })}
+          disabled={dim || cfg.geolocation_enabled === false}
         />
 
         <_ssSettingCard>
@@ -245,6 +401,8 @@ function SettingsServer({ server }) {
 
         <_ssAdvancedSection cfg={cfg} bounds={bounds} patch={patch} dim={dim} />
       </_ssSettingGroup>
+
+      <_ssGeoDeviceGroup />
     </div>
   );
 }

@@ -40,6 +40,15 @@ _DEFAULT = {
     "cwd": None,
     "lib_id": None,
     "extra_prompt_path": None,
+    # Per-session git worktree (opt-in at create time; see
+    # orchestrator_worktree.py). `cwd` above deliberately STAYS the agent dir
+    # — the worktree is an additional runtime location, not a new identity, so
+    # the `?cwd=` filter / lib_id grouping / artifacts / prompts keep working.
+    # `worktree_repo_root` is the git TOPLEVEL, which can differ from `cwd`
+    # when the agent dir is a subdirectory of the repo.
+    "worktree_name": None,
+    "worktree_path": None,
+    "worktree_repo_root": None,
     # Unix timestamp of the FIRST sidecar write for this id. Used by the
     # orphan-summary stub so a session created via POST /sessions has a
     # stable `updated_at` between back-to-back list polls (was: `time.time()`
@@ -112,6 +121,9 @@ def _load_from_disk() -> dict[str, dict]:
             "cwd": _normalize_path_str(value.get("cwd")),
             "lib_id": _normalize_session_ref(value.get("lib_id")),
             "extra_prompt_path": _normalize_path_str(value.get("extra_prompt_path")),
+            "worktree_name": _normalize_session_ref(value.get("worktree_name")),
+            "worktree_path": _normalize_path_str(value.get("worktree_path")),
+            "worktree_repo_root": _normalize_path_str(value.get("worktree_repo_root")),
             "created_at": created_at_val,
         }
     return cleaned
@@ -220,6 +232,9 @@ def get_meta(session_id: str) -> dict:
         "cwd": _normalize_path_str(entry.get("cwd")),
         "lib_id": _normalize_session_ref(entry.get("lib_id")),
         "extra_prompt_path": _normalize_path_str(entry.get("extra_prompt_path")),
+        "worktree_name": _normalize_session_ref(entry.get("worktree_name")),
+        "worktree_path": _normalize_path_str(entry.get("worktree_path")),
+        "worktree_repo_root": _normalize_path_str(entry.get("worktree_repo_root")),
     }
 
 
@@ -282,6 +297,9 @@ async def set_meta(
     cwd: str | None = None,
     lib_id: str | None = None,
     extra_prompt_path: str | None = None,
+    worktree_name: str | None = None,
+    worktree_path: str | None = None,
+    worktree_repo_root: str | None = None,
     last_read_msg_count: int | None = None,
 ) -> None:
     """Mutate sidecar entry; `None` leaves a field unchanged.
@@ -300,6 +318,10 @@ async def set_meta(
     `""` to clear, `None` to leave unchanged. cwd/extra_prompt_path are
     normalized to None when blank; the caller (orchestrator session create)
     is expected to have already validated path safety.
+
+    `worktree_name` / `worktree_path` / `worktree_repo_root`: same set/clear
+    semantics. These NEVER replace `cwd` — see orchestrator_worktree.py's
+    module docstring for why the agent dir has to stay the session's identity.
     """
     import time as _time
     async with _lock:
@@ -317,6 +339,9 @@ async def set_meta(
         current.setdefault("cwd", None)
         current.setdefault("lib_id", None)
         current.setdefault("extra_prompt_path", None)
+        current.setdefault("worktree_name", None)
+        current.setdefault("worktree_path", None)
+        current.setdefault("worktree_repo_root", None)
         current.setdefault("created_at", 0.0)
         current.setdefault("last_read_msg_count", None)
         # Stamp created_at on first write so orphan-stub `updated_at` is
@@ -351,6 +376,12 @@ async def set_meta(
             current["lib_id"] = _normalize_session_ref(lib_id)
         if extra_prompt_path is not None:
             current["extra_prompt_path"] = _normalize_path_str(extra_prompt_path)
+        if worktree_name is not None:
+            current["worktree_name"] = _normalize_session_ref(worktree_name)
+        if worktree_path is not None:
+            current["worktree_path"] = _normalize_path_str(worktree_path)
+        if worktree_repo_root is not None:
+            current["worktree_repo_root"] = _normalize_path_str(worktree_repo_root)
         if last_read_msg_count is not None:
             # Clamp to non-negative int. Pass -1 (or any negative) to clear.
             try:

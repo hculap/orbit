@@ -1,0 +1,11 @@
+{
+  "source": "local",
+  "description": "Ask the USER'S BROWSER where the user physically is (navigator.geolocation via the dashboard), then turn that fix into a street address or a list of nearby places from OpenStreetMap. Use for \"gdzie jestem\", \"moja lokalizacja\", \"co jest najbliżej\", \"najbliższa apteka\", \"ile mam do domu\", \"where am I\", \"nearest X\". NOT for the server's own location (this box sits in a Helsinki datacenter) and NOT when the user already named a city.",
+  "icon": "📍",
+  "version": null,
+  "git_origin": null,
+  "git_ref": null,
+  "git_sha": null,
+  "zip_hash": null,
+  "plugin_root": null
+}

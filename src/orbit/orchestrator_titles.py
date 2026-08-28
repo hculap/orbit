@@ -73,13 +73,21 @@ def _truncate_msg(text: str, limit: int = _PER_MSG_BYTE_LIMIT) -> str:
 
 
 def _count_user_messages(session_id: str) -> int:
-    """Count user-authored entries in the JSONL, skipping echo control msgs."""
+    """Count HUMAN-authored entries in the JSONL.
+
+    Skips echo control msgs, tool results, and synthetic turns (a message
+    from another Claude session, a background-task notification): none of
+    those should push the session across a ``TITLE_THRESHOLDS`` milestone,
+    or a peer ping would trigger a retitle of somebody else's conversation.
+    """
     path = jsonl_mod.jsonl_path(session_id)
     if not path.exists():
         return 0
     n = 0
     for evt in jsonl_mod._iter_lines(path):
         if evt.get("type") != "user":
+            continue
+        if jsonl_mod._is_synthetic_user(evt):
             continue
         msg = evt.get("message") or {}
         content = msg.get("content")
@@ -99,6 +107,10 @@ def _build_excerpt(session_id: str) -> str:
     Always includes the FIRST user message (defines what the session is
     about) plus the LAST few rounds (shows current direction). Bounded by
     ``_EXCERPT_BYTE_LIMIT``.
+
+    Synthetic user turns (peer messages, task notifications) are dropped —
+    they are machine input wrapped in harness boilerplate and would otherwise
+    define the title of a session they merely interrupted.
     """
     path = jsonl_mod.jsonl_path(session_id)
     if not path.exists():
@@ -107,6 +119,8 @@ def _build_excerpt(session_id: str) -> str:
     for evt in jsonl_mod._iter_lines(path):
         etype = evt.get("type")
         if etype not in ("user", "assistant"):
+            continue
+        if etype == "user" and jsonl_mod._is_synthetic_user(evt):
             continue
         msg = evt.get("message") or {}
         content = msg.get("content")

@@ -1,6 +1,6 @@
 ---
 name: a2a
-description: Send messages BETWEEN Claude Code agents running on this host (agent-to-agent). `send` is a PURE ENQUEUE — the dashboard writes the message into the target agent's maildir and returns; there is NO push/revive, the target's human drains it later. Use to hand off work to another agent (a PARA area/project agent or the global agent) or reply to one that mailed you. Verbs — `list` (who's around, warm/cold, PARA dir + sessions), `whois <lib_id>` (one agent's full identity + dir + all sessions incl. transcript paths), `send --to <lib_id|global>` (enqueue a message), `inbox --drain` (read + clear YOUR own mailbox), `read <id>`. NOT for talking to the human user — that's normal chat.
+description: Send messages BETWEEN Claude Code agents running on this host (agent-to-agent). `send` is a PURE ENQUEUE — the dashboard writes the message into the target agent's maildir and returns; there is NO push/revive, the target's human drains it later. For a LIVE peer use the native `ListAgents`/`SendMessage` tools instead; when you need an answer from a cold agent use the dashboard MCP `send_and_wait` — a2a is ONLY for leaving a note. Use to hand off work to another agent (a PARA area/project agent or the global agent) or reply to one that mailed you. Verbs — `list` (who's around, warm/cold, PARA dir + sessions), `whois <lib_id>` (one agent's full identity + dir + all sessions incl. transcript paths), `send --to <lib_id|global>` (enqueue a message), `inbox --drain` (read + clear YOUR own mailbox), `read <id>`. NOT for talking to the human user — that's normal chat.
 metadata:
   emoji: 📬
 ---
@@ -30,6 +30,26 @@ You use this skill to **talk to other agents**, not to the human:
 
 > This is agent↔agent only. To answer the human, just reply in chat as usual.
 > There is no listener/arming/Monitor watcher in v2 — mail is drained manually.
+
+## Routing — read this BEFORE you send
+
+A2A is one of three channels, and it is the only one that does **not** reach
+anybody now. Pick by whether the target is live:
+
+| Situation | Use | Why |
+|---|---|---|
+| The peer has a **live session** | native **`ListAgents`** + **`SendMessage`** tools | real wake, cross-project, its reply comes back to you on its own |
+| Target is **cold**, or you need the answer **synchronously** | dashboard MCP `send_and_wait` / `create_session` + `start_session` — or `curl -X POST "$HD_NOTIFY_URL/api/orchestrator/sessions/<id>/messages"` when the MCP is absent (it is, for non-global agents); `<id>` comes from `whois <lib_id>` | actually starts/drives a session and blocks for the reply |
+| You deliberately want to **leave a note** for later | **this skill** (`a2a send`) | pure enqueue — sits in the maildir until that agent's human runs `a2a inbox --drain` |
+
+The first send to a peer you have not messaged in this conversation comes back
+asking you to re-send with its `[ref]` — that is a confirmation gate (it fires
+even for a name that is unique in the listing, so it is not disambiguation), not
+an error. Re-send with the ref it printed.
+
+**Do not use `a2a send` when you need something to happen.** It wakes nobody,
+delivers nothing, and never spawns a session; undrained mail is garbage-collected
+after 7 days.
 
 ## 2. Identity & maildir
 
@@ -107,7 +127,7 @@ flip the `a2a_enabled` server flag (Settings → Serwer) or check the token.
 
 The dashboard SERVER is the only writer of inbox envelopes. You never craft the
 JSON — `send` only carries `{to, type, text, …}` and the server fills in the
-rest. A delivered envelope looks like:
+rest. An enqueued envelope looks like:
 
 ```json
 {

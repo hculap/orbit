@@ -66,6 +66,9 @@ function _handleJump(msg, msgKey, onClose) {
 // font sizes adapt to compact mode.
 function PinRow({ turnIdx, msg, msgKey, togglePin, onClose, compact }) {
   const isAgent = msg.role === 'assistant' || msg.role === 'tool_result';
+  // A `peer` row is neither — labelling it "you" would credit another
+  // session's message to the human reading the pin list.
+  const isPeer = msg.role === 'peer';
   const preview = _previewOf(msg) || '(brak treści)';
   const padV = compact ? 14 : 8;
   const fontTitle = compact ? 'var(--t-xs)' : 'var(--t-2xs)';
@@ -88,10 +91,12 @@ function PinRow({ turnIdx, msg, msgKey, togglePin, onClose, compact }) {
           minHeight: compact ? 32 : 0,
         }}>
         <span className="mono" style={{
-          fontSize: fontTitle, color: isAgent ? 'var(--accent)' : 'var(--fg-3)',
+          fontSize: fontTitle,
+          color: isPeer ? 'var(--info)' : (isAgent ? 'var(--accent)' : 'var(--fg-3)'),
           textTransform: 'uppercase', letterSpacing: '0.06em',
         }}>
-          {isAgent ? 'orchestrator' : 'you'} · #{turnIdx}
+          {isPeer ? (window.peerSenderLabel ? window.peerSenderLabel(msg.peer) : 'inna sesja')
+            : (isAgent ? 'orchestrator' : 'you')} · #{turnIdx}
         </span>
         <span style={{
           color: 'var(--fg-2)', overflow: 'hidden',

@@ -14,6 +14,7 @@ import io
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -24,6 +25,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from . import agent_prompts as agent_prompts_mod
 from . import bundled_mcp as bundled_mcp_mod
+from . import geo_routes as geo_routes_mod
+from . import orchestrator_geo as geo_mod
 from . import orchestrator_a2a as a2a_mod
 from . import orchestrator_artifacts as artifacts_mod
 from . import orchestrator_read_aloud as read_aloud_mod
@@ -43,6 +46,7 @@ from . import orchestrator_terminal as terminal_mod
 from . import orchestrator_terminal_shortcuts as shortcuts_mod
 from . import orchestrator_agent_tab_order as tab_order_mod
 from . import orchestrator_tmux as tmux_mod
+from . import orchestrator_worktree as worktree_mod
 from . import orchestrator_ttyd as ttyd_mod
 from . import orchestrator_uploads as uploads_module
 from . import orchestrator_voice as voice_mod
@@ -278,7 +282,13 @@ async def _warm_session_slot(session_id: str, *, wait_ready: bool = True) -> boo
         if isinstance(sidecar, dict) and isinstance(sidecar.get("lib_id"), str)
         else None
     )
-    cwd_path = Path(cwd_str) if isinstance(cwd_str, str) and cwd_str else HOME
+    # Where to spawn / what to tail. For a plain session this is just the
+    # sidecar cwd; for a worktree session the launch dir, the --worktree flag
+    # and the transcript slug can all differ — resolved together so they
+    # cannot drift apart. NOTE the prompt stack + skills farm below stay keyed
+    # on the AGENT cwd, not the worktree: identity is per-agent.
+    target = worktree_mod.resolve_spawn_target(sidecar if isinstance(sidecar, dict) else {}, session_id)
+    cwd_path = target.cwd
     model = sidecar.get("model") if isinstance(sidecar, dict) else None
     append_paths = agent_prompts_mod.prompts_for_session(cwd_str, lib_id)
 
@@ -290,22 +300,15 @@ async def _warm_session_slot(session_id: str, *, wait_ready: bool = True) -> boo
         print(f"[orchestrator] warm-slot skills farm build failed: {exc}")
     add_dirs = [agent_skills_dir] if agent_skills_dir is not None else None
 
-    # Match the runner's resume check: cwd-aware JSONL lookup (claude
-    # organizes transcripts by cwd slug, not bare session id).
-    try:
-        existing_jsonl = tail_mod.jsonl_path_for(cwd_path, session_id)
-        wants_resume = existing_jsonl.is_file()
-    except Exception:  # noqa: BLE001 — fall back to fresh session
-        wants_resume = False
-
     await pool.acquire(
         session_id=session_id,
         cwd=cwd_path,
         append_system_prompt_paths=append_paths,
         add_dirs=add_dirs,
-        resume=wants_resume,
+        resume=target.resume,
         model=model,
         env_extra=artifacts_mod.session_env(session_id, lib_id),
+        worktree=target.worktree_flag,
         wait_ready=wait_ready,
     )
     return True
@@ -436,9 +439,23 @@ def _decorate_session(summary: dict[str, Any], meta: dict[str, Any] | None) -> d
     # Legacy sessions created cwd-only (no lib_id) still resolve to their agent
     # so the chat scope shows e.g. "Health" (+ icon), not "Global".
     lib_id = lib_id or _lib_id_from_cwd(cwd)
+    raw_wt_name = meta.get("worktree_name")
+    worktree_name = raw_wt_name if isinstance(raw_wt_name, str) and raw_wt_name else None
+    raw_wt_path = meta.get("worktree_path")
+    worktree_path = raw_wt_path if isinstance(raw_wt_path, str) and raw_wt_path else None
     msg_count = int(summary.get("msg_count") or 0)
     raw_lr = meta.get("last_read_msg_count")
     last_read = int(raw_lr) if isinstance(raw_lr, int) and not isinstance(raw_lr, bool) and raw_lr >= 0 else 0
+    # A stored last_read can EXCEED msg_count when a transcript shrinks (a
+    # deleted / rewritten / truncated JSONL). Without the clamp the next N
+    # real messages would silently produce unread_count 0. Clamping here also
+    # stops the returned `last_read_msg_count` from lying.
+    # NOTE this is a guard, not a repair: it leaves last_read == msg_count, and
+    # the frontend mark-read effect early-returns while `msgCount <= lastRead`,
+    # so the sidecar is not rewritten from here. It is only sound because
+    # msg_count is monotonic — peer/task-notification entries stay counted
+    # (see _build_summary) — so the clamp fires on genuine truncation only.
+    last_read = min(last_read, msg_count)
     unread_count = max(0, msg_count - last_read)
     return {
         **summary,
@@ -453,6 +470,14 @@ def _decorate_session(summary: dict[str, Any], meta: dict[str, Any] | None) -> d
         "model": model,
         "cwd": cwd,
         "lib_id": lib_id,
+        # Per-session git worktree. `cwd` above deliberately stays the AGENT
+        # dir (the `?cwd=` filter and the frontend's agent grouping both match
+        # on it exactly), so the worktree ships as its own field and the UI
+        # gates its badge on `worktree_name` — not on the server flag, so an
+        # L1 rollback doesn't mislabel sessions that already have one.
+        "worktree_name": worktree_name,
+        "worktree_path": worktree_path,
+        "worktree_missing": bool(worktree_path) and not _worktree_dir_exists(worktree_path),
         "last_read_msg_count": last_read,
         "unread_count": unread_count,
     }
@@ -489,6 +514,28 @@ def _branch_for_cwd(cwd: str | None) -> str | None:
     return branch
 
 
+# Same rationale as the branch cache above: `_decorate_session` runs once per
+# session on a ~1 s-polled list handler, so an unguarded `is_dir()` would be N
+# stats per poll. A worktree can only disappear via an out-of-band
+# `git worktree remove`, so 5 s of staleness is immaterial.
+_worktree_exists_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _worktree_dir_exists(path: str | None) -> bool:
+    if not path:
+        return False
+    now = time.monotonic()
+    cached = _worktree_exists_cache.get(path)
+    if cached is not None and (now - cached[0]) < _BRANCH_CACHE_TTL_S:
+        return cached[1]
+    try:
+        exists = Path(path).is_dir()
+    except OSError:
+        exists = False
+    _worktree_exists_cache[path] = (now, exists)
+    return exists
+
+
 def _orphan_summary_stub(session_id: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a summary-shaped dict for a session that has a sidecar entry but
     no JSONL transcript yet (just created via POST /sessions, no first turn).
@@ -514,6 +561,9 @@ def _orphan_summary_stub(session_id: str, meta: dict[str, Any] | None = None) ->
         "created_at": ts,
         "updated_at": ts,
         "msg_count": 0,
+        # Mirrors _build_summary's observability field so the session-list
+        # payload has ONE shape whether or not a transcript exists yet.
+        "peer_msg_count": 0,
         "last_user_preview": "",
         "last_role": "",
         "first_user_preview": "",
@@ -588,7 +638,15 @@ async def _list_sessions_handler(
     # a blocking `git` once per uncached cwd (TTL cache in _branch_for_cwd),
     # so resolve the UNIQUE cwds CONCURRENTLY off the event loop instead of
     # forking git serially per session on this ~1 s-polled handler.
-    unique_cwds = {s.get("cwd") for s in decorated if s.get("cwd")}
+    # Key on the worktree when the session has one: a worktree session's
+    # interesting branch is `worktree-<name>`, not the main checkout's `main`.
+    # Falling back to `cwd` keeps every other session byte-identical.
+    def _branch_key(s: dict[str, Any]) -> str | None:
+        if s.get("worktree_path") and not s.get("worktree_missing"):
+            return s["worktree_path"]
+        return s.get("cwd")
+
+    unique_cwds = {k for s in decorated if (k := _branch_key(s))}
     branch_map: dict[str, str | None] = {}
     if unique_cwds:
         cwds = list(unique_cwds)
@@ -597,7 +655,7 @@ async def _list_sessions_handler(
         )
         branch_map = dict(zip(cwds, branches))
     for s in decorated:
-        s["git_branch"] = branch_map.get(s.get("cwd"))
+        s["git_branch"] = branch_map.get(_branch_key(s))
     return decorated
 
 
@@ -674,6 +732,9 @@ async def _create_session_handler(payload: dict[str, Any]) -> dict[str, Any]:
         model: str | None — one of ALLOWED_MODELS; validated.
         extra_system_prompt: str | None — ≤8 KB; written to a per-session
             prompt file and the path persisted in sidecar.extra_prompt_path.
+        worktree: bool — run this session's REPL in its own git worktree.
+        worktree_name: str | None — the worktree name; blank/absent ⇒ the
+            server generates one. Requires `worktree: true`.
 
     Validation is strict: every field is checked before any disk write so a
     bad payload never produces a half-written session.
@@ -713,6 +774,64 @@ async def _create_session_handler(payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(400, detail=f"model must be null or one of: {allowed}")
         model = candidate
 
+    # ── worktree opt-in ────────────────────────────────────────────
+    # Resolved BEFORE any disk write so a rejected worktree never leaves a
+    # half-created session behind. `cwd` is validated above and stays the
+    # session's identity — the worktree is recorded alongside it, never
+    # instead of it (see orchestrator_worktree's module docstring).
+    raw_worktree = payload.get("worktree")
+    if raw_worktree is not None and not isinstance(raw_worktree, bool):
+        raise HTTPException(400, detail="worktree must be a boolean or null")
+    want_worktree = bool(raw_worktree)
+
+    raw_worktree_name = payload.get("worktree_name")
+    if raw_worktree_name is not None and not isinstance(raw_worktree_name, str):
+        raise HTTPException(400, detail="worktree_name must be a string or null")
+    if raw_worktree_name and not want_worktree:
+        raise HTTPException(400, detail="worktree_name requires worktree: true")
+
+    worktree_name: str | None = None
+    worktree_path: str | None = None
+    worktree_repo_root: str | None = None
+    worktree_branch: str | None = None
+    worktree_warnings: list[str] = []
+    if want_worktree:
+        # A silently-ignored flag would let the UI half-work (a session that
+        # claims isolation but runs in the main checkout), so an off flag is a
+        # hard 400 rather than a no-op.
+        if not settings_mod.get_flag("worktree_sessions_enabled"):
+            raise HTTPException(400, detail="worktree sessions are disabled")
+        if not cwd:
+            raise HTTPException(
+                400, detail="worktree sessions need an agent cwd (Global sessions have none)"
+            )
+        report = worktree_mod.preflight(Path(cwd), raw_worktree_name)
+        if not report["ok"]:
+            detail = "; ".join(report["errors"]) or "worktree preflight failed"
+            # 409 for "the name is taken" (retryable with a different name),
+            # 400 for everything structural (not a repo, bad name).
+            status = 409 if any("already exists" in e for e in report["errors"]) else 400
+            raise HTTPException(status, detail=detail)
+        worktree_name = report["suggested_name"]
+        worktree_path = report["worktree_path"]
+        worktree_repo_root = report["repo_root"]
+        worktree_branch = report["branch"]
+        worktree_warnings = list(report["warnings"])
+        # Two live sessions sharing one worktree means two REPLs editing one
+        # tree; claude's own lock makes the second a non-owning guest rather
+        # than refusing, so we refuse here instead.
+        for other_id, other in meta_mod.all_meta().items():
+            if other.get("archived"):
+                continue
+            if other.get("worktree_path") == worktree_path:
+                raise HTTPException(
+                    409,
+                    detail=(
+                        f"session {other_id} already uses worktree {worktree_name!r} "
+                        f"— archive it or pick another name"
+                    ),
+                )
+
     raw_extra = payload.get("extra_system_prompt")
     extra_prompt_text: str | None = None
     if raw_extra is not None:
@@ -739,7 +858,8 @@ async def _create_session_handler(payload: dict[str, Any]) -> dict[str, Any]:
     # Empty strings on lib_id are silently ignored (treated as None) but
     # explicit non-empty values trigger a write so the GET filter sees them.
     needs_write = any(
-        v is not None for v in (title, cwd, lib_id, model, extra_prompt_path)
+        v is not None
+        for v in (title, cwd, lib_id, model, extra_prompt_path, worktree_name)
     ) or bool(title)
     if needs_write:
         await meta_mod.set_meta(
@@ -749,6 +869,9 @@ async def _create_session_handler(payload: dict[str, Any]) -> dict[str, Any]:
             lib_id=lib_id,
             model=model,
             extra_prompt_path=extra_prompt_path,
+            worktree_name=worktree_name,
+            worktree_path=worktree_path,
+            worktree_repo_root=worktree_repo_root,
         )
 
     return {
@@ -759,6 +882,12 @@ async def _create_session_handler(payload: dict[str, Any]) -> dict[str, Any]:
         "lib_id": lib_id,
         "model": model,
         "extra_prompt_path": extra_prompt_path,
+        # Echoed back so the client can name a SERVER-generated worktree in its
+        # toast — the only moment the user learns a random name.
+        "worktree_name": worktree_name,
+        "worktree_path": worktree_path,
+        "worktree_branch": worktree_branch,
+        "warnings": worktree_warnings,
     }
 
 
@@ -954,12 +1083,45 @@ async def _close_session_handler(session_id: str, *, kill: bool = False) -> dict
     return {"ok": True}
 
 
-async def _delete_session_handler(session_id: str) -> dict[str, Any]:
-    """DELETE /api/orchestrator/sessions/{id} — JSONL + sidecar + uploads + prompt file."""
+async def _delete_session_handler(
+    session_id: str, *, remove_worktree: bool = False
+) -> dict[str, Any]:
+    """DELETE /api/orchestrator/sessions/{id} — JSONL + sidecar + uploads + prompt file.
+
+    The session's git worktree is KEPT by default: deleting a chat must never
+    silently discard a branch's work. ``?worktree=remove`` opts in, and even
+    then the removal is non-destructive — no ``--force``, so a worktree with
+    modified/untracked files refuses and is reported back as
+    ``worktree_removed: false`` with git's own reason.
+    """
     await _release_session_slots(session_id, forget_persistent=True)
     # Read the per-session prompt path BEFORE wiping the sidecar so we can
     # unlink the file too — otherwise it'd be orphaned forever.
-    prompt_path_str = meta_mod.get_meta(session_id).get("extra_prompt_path")
+    sidecar = meta_mod.get_meta(session_id)
+    prompt_path_str = sidecar.get("extra_prompt_path")
+
+    # Worktree removal runs AFTER _release_session_slots (a live claude holds a
+    # `git worktree lock`, so removal would fail while the REPL is up) and
+    # BEFORE remove_meta (which is where the path lives).
+    worktree_removed: bool | None = None
+    worktree_error = ""
+    wt_path = sidecar.get("worktree_path")
+    wt_root = sidecar.get("worktree_repo_root")
+    if remove_worktree and isinstance(wt_path, str) and wt_path:
+        if not (isinstance(wt_root, str) and wt_root):
+            worktree_removed, worktree_error = False, "session has no recorded repo root"
+        else:
+            try:
+                outcome = await asyncio.to_thread(
+                    worktree_mod.remove_worktree, Path(wt_root), Path(wt_path)
+                )
+                worktree_removed = bool(outcome.get("ok"))
+                worktree_error = str(outcome.get("error") or "")
+            except Exception as exc:  # noqa: BLE001 — never block session deletion
+                worktree_removed, worktree_error = False, str(exc)
+        if not worktree_removed:
+            print(f"[orchestrator] worktree removal for {session_id} failed: {worktree_error}")
+
     jsonl_mod.delete_session(session_id)
     await meta_mod.remove_meta(session_id)
     # Best-effort upload cleanup — must not block primary deletion.
@@ -977,7 +1139,12 @@ async def _delete_session_handler(session_id: str) -> dict[str, Any]:
                 os.unlink(prompt_path)
         except OSError as exc:
             print(f"[orchestrator] unlink session prompt {session_id} failed: {exc}")
-    return {"ok": True}
+    out: dict[str, Any] = {"ok": True}
+    if worktree_removed is not None:
+        out["worktree_removed"] = worktree_removed
+        if worktree_error:
+            out["worktree_error"] = worktree_error
+    return out
 
 
 async def _read_messages_handler(
@@ -1085,6 +1252,10 @@ async def _post_message_handler(session_id: str, payload: dict[str, Any]) -> dic
     lib_id = sidecar.get("lib_id") if isinstance(sidecar.get("lib_id"), str) else None
     extra_prompt_str = sidecar.get("extra_prompt_path")
     cwd_path = Path(cwd_str) if isinstance(cwd_str, str) and cwd_str else None
+    # Worktree-aware spawn target (a no-op triple for non-worktree sessions).
+    # `cwd_path` above stays the AGENT dir and keeps feeding the prompt stack /
+    # skills farm / scope-`.env` below; only the runner gets the worktree dirs.
+    spawn_target = worktree_mod.resolve_spawn_target(sidecar, session_id)
     extra_prompt_path = (
         Path(extra_prompt_str) if isinstance(extra_prompt_str, str) and extra_prompt_str else None
     )
@@ -1124,7 +1295,9 @@ async def _post_message_handler(session_id: str, payload: dict[str, Any]) -> dic
         active = runner_tmux_mod.TmuxClaudeRunner(
             session_id,
             pool=pool,
-            cwd=cwd_path,
+            cwd=spawn_target.cwd,
+            transcript_cwd=spawn_target.transcript_cwd,
+            worktree=spawn_target.worktree_flag,
             append_system_prompt_paths=append_paths,
             has_run_before=has_run_before,
             model=model,
@@ -1333,18 +1506,26 @@ async def _capabilities_handler() -> dict[str, Any]:
             "semantic_search": semantic,
             "embedding_ready": search_mod.embedding_ready(),
             "messages_pagination": True,
+            "worktree_sessions": bool(settings_mod.get_flag("worktree_sessions_enabled")),
+            "geolocation": bool(settings_mod.get_flag("geolocation_enabled")),
+            "geolocation_geocode": bool(settings_mod.get_flag("geolocation_geocode_enabled")),
             "global_events": False,
             "agent_context": False,
         },
         "sse_events": [
             "turn_started", "turn_done", "turn_error",
             "artifact_create", "artifact_open", "speak",
+            "geo_request", "geo_cancelled",
         ],
         "limits": {
             "wait_timeout_max_s": wait_mod.WAIT_TIMEOUT_MAX_S,
             "wait_max_concurrent": wait_mod.WAIT_MAX_CONCURRENT,
             "search_limit_max": search_mod._LIMIT_MAX,
             "messages_limit_max": 500,
+            "geo_wait_timeout_max_s": geo_mod.GEO_WAIT_TIMEOUT_MAX_S,
+            "geo_wait_max_concurrent": geo_mod.GEO_WAIT_MAX_CONCURRENT,
+            "geo_request_ttl_s": geo_mod.GEO_REQUEST_TTL_S,
+            "geo_max_pending": geo_mod.GEO_MAX_PENDING,
         },
     }
 
@@ -1542,11 +1723,95 @@ def _register_artifact_routes(app: FastAPI) -> None:
         # Content-Type on the app origin (svg+xml / html → XSS). Allowlist +
         # nosniff; unknown/unsafe types download as octet-stream.
         media_type, disposition = _safe_artifact_serving(manifest.get("type"), manifest.get("mime"))
+        # Download under the name the agent gave the file, not the opaque
+        # art-<id>.<ext> the payload is stored as. Sanitised in the helper —
+        # the manifest is agent-written, so it reaches a header untrusted.
+        name = artifacts_mod.header_filename(manifest, p.name)
         return FileResponse(
             p, media_type=media_type,
             headers={
                 "X-Content-Type-Options": "nosniff",
-                "Content-Disposition": f'{disposition}; filename="{p.name}"',
+                "Content-Disposition": f'{disposition}; filename="{name}"',
+            },
+        )
+
+    @app.get("/api/orchestrator/artifacts/{artifact_id}/preview")
+    async def api_artifact_preview(
+        artifact_id: str,
+        limit: int = Query(default=artifacts_mod.PREVIEW_MAX_BYTES),
+        session_id: str | None = Query(default=None),
+        lib_id: str | None = Query(default=None),
+        cwd: str | None = Query(default=None),
+    ):
+        """Read an artifact IN PLACE — no download round-trip.
+
+        ``/file`` forces ``attachment`` + octet-stream for anything outside the
+        image/audio/video mime allowlist, which is right for bytes you save but
+        useless when you only want to read or copy a report, CSV, or PDF. This
+        route is the inline half of that contract:
+
+        * text family → ``text/plain`` (NEVER ``text/html``: same-origin XSS),
+          truncated to ``limit`` chars, with ``X-Artifact-Truncated`` /
+          ``X-Artifact-Size`` so the UI can say "showing the first N of M".
+        * pdf → ``application/pdf`` pinned into an opaque sandbox origin, same
+          CSP trick as ``/view`` — the browser's own viewer renders it, the
+          document gets no same-origin access to the dashboard.
+        * anything else → 415, so the UI falls back to the download row.
+        """
+        dirp = _resolve_artifacts_dir(session_id, lib_id, cwd)
+        try:
+            manifest = artifacts_mod.get(dirp, artifact_id)
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+        if manifest is None:
+            raise HTTPException(404, detail="artifact not found")
+        kind = artifacts_mod.preview_kind(manifest)
+        if kind is None:
+            if manifest.get("type") in artifacts_mod.SPEC_TYPES or not manifest.get("src"):
+                raise HTTPException(404, detail="artifact has no file (spec type)")
+            raise HTTPException(415, detail="no inline preview for this file type")
+        try:
+            fp = artifacts_mod.file_path(dirp, manifest)
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+        if fp is None or not fp.is_file():
+            raise HTTPException(404, detail="artifact file missing")
+
+        if kind == "pdf":
+            return FileResponse(
+                fp, media_type=artifacts_mod.PDF_MIME,
+                headers={
+                    "X-Content-Type-Options": "nosniff",
+                    # Same opaque-origin pin as /view: a PDF can carry script,
+                    # and this route serves it on the dashboard's own origin.
+                    "Content-Security-Policy": "sandbox allow-scripts allow-popups;",
+                    "Content-Disposition": (
+                        f'inline; filename="{artifacts_mod.header_filename(manifest, fp.name)}"'
+                    ),
+                },
+            )
+
+        capped = max(
+            artifacts_mod.PREVIEW_MIN_BYTES,
+            min(int(limit), artifacts_mod.PREVIEW_MAX_BYTES),
+        )
+        try:
+            # Bounded read + utf-8 decode is real (if small) blocking IO; the
+            # gallery fires one of these per text tile, so keep it off the loop.
+            text, total, cut = await asyncio.to_thread(
+                artifacts_mod.read_text_head, fp, capped
+            )
+        except OSError as exc:
+            raise HTTPException(500, detail=f"preview failed: {exc}")
+        return Response(
+            content=text, media_type="text/plain; charset=utf-8",
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "X-Artifact-Truncated": "1" if cut else "0",
+                "X-Artifact-Size": str(total),
+                "Content-Disposition": (
+                    f'inline; filename="{artifacts_mod.header_filename(manifest, fp.name)}"'
+                ),
             },
         )
 
@@ -1641,7 +1906,10 @@ def _register_artifact_routes(app: FastAPI) -> None:
             manifest = artifacts_mod.get(dirp, artifact_id)
         except ValueError as exc:
             raise HTTPException(400, detail=str(exc))
-        if manifest is None or manifest.get("type") != "image":
+        if manifest is None:
+            raise HTTPException(404, detail="no thumbnail")
+        is_pdf = artifacts_mod.preview_kind(manifest) == "pdf"
+        if manifest.get("type") != "image" and not is_pdf:
             raise HTTPException(404, detail="no thumbnail")
         try:
             p = artifacts_mod.file_path(dirp, manifest)
@@ -1650,6 +1918,27 @@ def _register_artifact_routes(app: FastAPI) -> None:
         if p is None:
             raise HTTPException(404)
         size = max(32, min(int(size), 1024))
+
+        if is_pdf:
+            # Page 1 as a JPEG so a PDF artifact gets a real gallery tile
+            # instead of a generic file icon. poppler writes to stdout when no
+            # output root is given; a missing binary / unreadable pdf 404s so
+            # the tile silently falls back to the icon.
+            def _pdf_thumb() -> bytes:
+                proc = subprocess.run(
+                    ["pdftoppm", "-jpeg", "-f", "1", "-l", "1", "-scale-to", str(size), str(p)],
+                    capture_output=True, timeout=15,
+                )
+                if proc.returncode != 0 or not proc.stdout:
+                    raise RuntimeError((proc.stderr or b"")[:200].decode("utf-8", "replace"))
+                return proc.stdout
+
+            try:
+                data = await asyncio.to_thread(_pdf_thumb)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                raise HTTPException(404, detail=f"pdf thumbnail unavailable: {exc}")
+            return Response(content=data, media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=3600"})
 
         def _make_thumb() -> bytes:
             from PIL import Image, ImageOps
@@ -2095,6 +2384,11 @@ def register_routes(app: FastAPI) -> None:
     tts_mod.register_routes(app)
     _register_artifact_routes(app)
     _register_a2a_routes(app)
+    # Device geolocation round trip. Like the terminal routes, these mount
+    # unconditionally and check ``geolocation_enabled`` INSIDE each handler,
+    # so the Settings kill-switch takes effect on the next request with no
+    # restart. Flag off ⇒ every agent-facing route 403s.
+    geo_routes_mod.register_geo_routes(app)
     # Inline interactive terminal (ttyd-backed). Routes are mounted
     # unconditionally; the kill-switch ``ttyd_enabled`` lives inside each
     # route so the user can toggle the feature from Settings without a
@@ -2435,12 +2729,82 @@ def register_routes(app: FastAPI) -> None:
             raise HTTPException(400, detail=str(e))
 
     @app.delete("/api/orchestrator/sessions/{session_id}")
-    async def api_delete_session(session_id: str) -> dict[str, Any]:
-        """Delete JSONL transcript and sidecar entry."""
+    async def api_delete_session(
+        session_id: str, worktree: str = Query(default="keep"),
+    ) -> dict[str, Any]:
+        """Delete JSONL transcript and sidecar entry.
+
+        ``?worktree=remove`` also removes the session's git worktree (never
+        forced — a dirty tree refuses and is reported, not discarded).
+        """
+        if worktree not in ("keep", "remove"):
+            raise HTTPException(400, detail="worktree must be 'keep' or 'remove'")
         try:
-            return await _delete_session_handler(session_id)
+            return await _delete_session_handler(
+                session_id, remove_worktree=(worktree == "remove")
+            )
         except ValueError as e:
             raise HTTPException(400, detail=str(e))
+
+    @app.get("/api/orchestrator/worktrees/preflight")
+    async def api_worktree_preflight(
+        cwd: str = Query(default=""),
+        name: str = Query(default=""),
+    ) -> dict[str, Any]:
+        """Can this agent dir host a worktree named ``name``?
+
+        Drives the new-session modal's checkbox state: it never blocks session
+        creation, so every failure mode (flag off, no cwd, not a repo, git
+        blew up) returns 200 with ``ok:false`` + a reason rather than an error
+        status. The client greys the row and creates a normal session.
+        """
+        if not settings_mod.get_flag("worktree_sessions_enabled"):
+            return {"ok": False, "enabled": False, "is_repo": False, "errors": ["disabled"]}
+        if not cwd.strip():
+            # Global sessions have no agent dir, and $HOME is not a repo.
+            return {
+                "ok": False,
+                "enabled": True,
+                "is_repo": False,
+                "errors": ["session has no agent directory"],
+            }
+        try:
+            validated = _validate_cwd_under_home(cwd)
+        except ValueError as exc:
+            return {"ok": False, "enabled": True, "is_repo": False, "errors": [str(exc)]}
+        report = await asyncio.to_thread(
+            worktree_mod.preflight, Path(validated), name or None
+        )
+        return {**report, "enabled": True}
+
+    @app.post("/api/orchestrator/sessions/{session_id}/worktree/recreate")
+    async def api_worktree_recreate(session_id: str) -> dict[str, Any]:
+        """Re-create a worktree that vanished out of band.
+
+        Deliberately explicit rather than automatic: a fresh checkout under a
+        transcript that "remembers" edits makes the model contradict itself, so
+        the user has to ask. This only clears the way — the next spawn re-emits
+        ``--worktree=<name>`` because ``resolve_spawn_target`` sees no dir.
+        """
+        if not uploads_module.SESSION_ID_RE.fullmatch(session_id or ""):
+            raise HTTPException(400, detail="invalid session_id")
+        sidecar = meta_mod.get_meta(session_id)
+        name = sidecar.get("worktree_name")
+        path = sidecar.get("worktree_path")
+        root = sidecar.get("worktree_repo_root")
+        if not (isinstance(name, str) and name and isinstance(path, str) and path):
+            raise HTTPException(400, detail="session has no worktree")
+        if Path(path).is_dir():
+            return {"ok": True, "recreated": False, "detail": "worktree already exists"}
+        # git still has the worktree registered (its admin files live in
+        # .git/worktrees/<name>); prune the stale registration so claude's
+        # `--worktree` can re-create it cleanly on the next spawn.
+        if isinstance(root, str) and root:
+            await asyncio.to_thread(
+                worktree_mod.library_git._git_run, ["worktree", "prune"], Path(root)
+            )
+        await _release_session_slots(session_id, forget_persistent=False)
+        return {"ok": True, "recreated": True, "worktree_name": name, "worktree_path": path}
 
     @app.post("/api/orchestrator/sessions/{session_id}/close")
     async def api_close_session(
@@ -2731,9 +3095,15 @@ def register_routes(app: FastAPI) -> None:
     async def api_patch_settings(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         """Merge known boolean flags into the on-disk settings."""
         try:
-            return await settings_mod.set_settings(payload)
+            settings = await settings_mod.set_settings(payload)
         except ValueError as e:
             raise HTTPException(400, detail=str(e))
+        # The geolocation kill switch promises that nothing survives it, and the
+        # per-route gate alone only stops NEW asks — sweep the ones already on a
+        # screen and drop the in-memory fix.
+        if settings.get("geolocation_enabled") is False:
+            geo_routes_mod.on_feature_disabled()
+        return settings
 
     # ── terminal soft-keyboard layout ──────────────────────────────
     # Opt-in manager (gated by the `terminal_shortcuts_enabled` flag). The

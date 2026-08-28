@@ -262,45 +262,18 @@ function Lightbox({ file, onClose }) {
   );
 }
 
-// MessageInput — composer card with drag/paste/attach + pending strip.
-// Lives here (not orchestrator.jsx) because it's tightly coupled to the
-// attachment UX. Send is enabled when text or any pending attachment exists.
-// Context window per model id. The Hetzner CLI install runs Claude Opus 4.x
-// (`claude-opus-4-7`, `claude-opus-4-8`, …) with the 1M-token context beta;
-// Sonnet/Haiku fall back to the standard 200k. We match the whole `opus-4`
-// family rather than a single version so a model bump doesn't silently revert
-// to 200k — that regression made a 597k-token Opus 4.8 session read as 100%
-// (red) instead of its real ~60%.
-function _modelContextWindow(modelId) {
-  if (typeof modelId !== 'string' || !modelId) return 200000;
-  if (modelId.indexOf('opus-4') !== -1) return 1000000;
-  return 200000;
-}
-
-function _formatTokens(n) {
-  if (!Number.isFinite(n) || n <= 0) return '0';
-  if (n >= 1000000) return (n / 1000000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(n >= 100_000 ? 0 : 0) + 'k';
-  return String(n);
-}
-
 // Shared usage descriptor — also consumed by SessionItem in orchestrator.jsx
 // via window.computeContextUsage. Returns null when there's nothing to render
 // (no assistant turns yet) so callers can early-exit.
-function computeContextUsage(tokens, model) {
-  const t = Number(tokens) || 0;
-  if (t <= 0) return null;
-  const win = _modelContextWindow(model);
-  const pct = Math.min(100, Math.round((t / win) * 100));
-  // Tier colours: muted < 60, accent 60-79, error 80+. Aligned with the user
-  // mental model where ~80% is "compact soon".
-  const color = pct >= 80 ? 'var(--err)'
-              : pct >= 60 ? 'var(--accent)'
-              :             'var(--fg-3)';
-  const title = _formatTokens(t) + ' / ' + _formatTokens(win) + ' tokens'
-              + (model ? ' · ' + model : '');
-  return { pct, color, title, tokens: t, window: win };
-}
+//
+// The sizing rule (which model id gets 1M vs 200k) lives in the JSX-free
+// static/model-context.js so `node --test tests/model-context.test.js` can
+// cover it — a hardcoded model version has silently mis-scaled this badge
+// twice. The `window.HubModelContext` guard keeps the composer rendering if
+// that script tag ever goes missing; the badge just disappears.
+const computeContextUsage = (tokens, model) => (
+  window.HubModelContext ? window.HubModelContext.contextUsage(tokens, model) : null
+);
 
 function _ContextUsage({ tokens, model }) {
   const u = computeContextUsage(tokens, model);
@@ -313,6 +286,9 @@ function _ContextUsage({ tokens, model }) {
   );
 }
 
+// MessageInput — composer card with drag/paste/attach + pending strip.
+// Lives here (not orchestrator.jsx) because it's tightly coupled to the
+// attachment UX. Send is enabled when text or any pending attachment exists.
 function MessageInput({
   value, onChange, onSend, disabled, hint, compact, inputRef,
   pendingAttachments, onFilesPicked, onRemovePending, onAttachClick, fileInputRef,

@@ -18,13 +18,58 @@ const { useState: _aUseState, useEffect: _aUseEffect, useRef: _aUseRef, useCallb
 
 const _ART_TYPE_ICON = {
   image: 'image', audio: 'volume', video: 'video', youtube: 'video',
-  chart: 'sparkle', map: 'globe', html: 'globe', file: 'file',
+  chart: 'sparkle', map: 'globe', html: 'globe', file: 'file', doc: 'book',
 };
 
 const _ART_TYPE_LABEL = {
   image: 'Obraz', audio: 'Audio', video: 'Wideo', youtube: 'YouTube',
-  chart: 'Wykres', map: 'Mapa', html: 'HTML', file: 'Plik',
+  chart: 'Wykres', map: 'Mapa', html: 'HTML', file: 'Plik', doc: 'Dokument',
 };
+
+// ── inline preview (read/copy without downloading) ───────────────────
+//
+// Client-side mirror of orchestrator_artifacts.preview_kind(): decides whether
+// an artifact can be READ in place ('text' / 'pdf') or is download-only (null).
+// `html` is deliberately excluded — it has its own sandboxed-iframe viewer.
+const _ART_TEXT_MIMES = new Set([
+  'application/json', 'application/ld+json', 'application/x-ndjson',
+  'application/xml', 'application/yaml', 'application/x-yaml',
+  'application/toml', 'application/javascript', 'application/x-javascript',
+  'application/sql', 'application/x-sh', 'application/x-shellscript',
+  'application/csv', 'application/graphql',
+]);
+const _ART_TEXT_EXTS = new Set([
+  'txt', 'text', 'md', 'markdown', 'rst', 'org', 'csv', 'tsv', 'json',
+  'ndjson', 'jsonl', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env',
+  'log', 'xml', 'css', 'scss', 'py', 'js', 'mjs', 'jsx', 'ts', 'tsx', 'sh',
+  'bash', 'zsh', 'sql', 'rs', 'go', 'rb', 'java', 'c', 'h', 'cpp', 'hpp',
+  'diff', 'patch', 'srt', 'vtt',
+]);
+
+function _artPreviewKind(a) {
+  if (!a || !a.src || a.type === 'html') return null;
+  if (a.type === 'doc') return 'text';
+  if (a.type === 'chart' || a.type === 'map' || a.type === 'youtube') return null;
+  const mime = String(a.mime || '').split(';')[0].trim().toLowerCase();
+  const ext = String(a.src).includes('.')
+    ? String(a.src).split('.').pop().toLowerCase() : '';
+  if (mime === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (mime.startsWith('text/') || _ART_TEXT_MIMES.has(mime)) return 'text';
+  if (_ART_TEXT_EXTS.has(ext)) return 'text';
+  return null;
+}
+
+// Name to save the artifact under — the agent's original filename when the
+// manifest recorded one, else the opaque art-<id>.<ext> payload name.
+function _artFilename(a) {
+  return (a && a.extra && a.extra.filename) || (a && (a.src || a.title || a.id)) || 'artifact';
+}
+
+function _artIsMarkdown(a) {
+  const mime = String((a && a.mime) || '').toLowerCase();
+  const ext = String((a && a.src) || '').split('.').pop().toLowerCase();
+  return mime === 'text/markdown' || ext === 'md' || ext === 'markdown';
+}
 
 // Sort options for the gallery toolbar. `cmp` operates on two artifacts.
 const _ART_SORTS = {
@@ -61,6 +106,41 @@ function artifactViewUrl(id, scope) {
 // window.opener back-reference (the sandboxed doc can't reach back anyway).
 function _artifactOpenFullscreen(artifact, scope) {
   window.open(artifactViewUrl(artifact.id, scope), '_blank', 'noopener');
+}
+
+// Inline-preview bytes: text/plain for text payloads (truncated to `limit`
+// chars), application/pdf for PDFs. 415 when the file is download-only.
+function artifactPreviewUrl(id, scope, limit) {
+  return apiUrl('/api/orchestrator/artifacts/' + encodeURIComponent(id) + '/preview?'
+    + _artScopeQs(scope) + (limit ? '&limit=' + limit : ''));
+}
+
+// Fetch an artifact's text preview. Returns {loading, text, truncated, size, error}.
+function _useArtifactText(artifact, scope, limit) {
+  const [state, setState] = _aUseState({ loading: true, text: null, truncated: false, size: null, error: false });
+  _aUseEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, text: null, truncated: false, size: null, error: false });
+    fetch(artifactPreviewUrl(artifact.id, scope, limit))
+      .then(r => (r.ok ? r.text().then(t => ({ t, r })) : Promise.reject(r.status)))
+      .then(({ t, r }) => {
+        if (cancelled) return;
+        setState({
+          loading: false, text: t, error: false,
+          truncated: r.headers.get('X-Artifact-Truncated') === '1',
+          size: Number(r.headers.get('X-Artifact-Size')) || null,
+        });
+      })
+      .catch(() => { if (!cancelled) setState({ loading: false, text: null, truncated: false, size: null, error: true }); });
+    return () => { cancelled = true; };
+  }, [artifact.id, limit]);
+  return state;
+}
+
+async function _artCopyText(text, toast) {
+  if (text == null) return;
+  const ok = window.HubClipboard ? await window.HubClipboard.copyText(text) : false;
+  toast && toast(ok ? 'Skopiowano' : 'Kopiowanie nie powiodło się', ok ? 'ok' : 'err');
 }
 
 function _artifactThumbUrl(id, scope, size) {
@@ -278,10 +358,96 @@ function _ArtifactVideo({ artifact, scope, siblings }) {
   );
 }
 
+// Scrollable monospace surface for a text payload (csv, log, json, code…).
+function _ArtifactTextBody({ text, truncated, size, mono = true, maxHeight = 420 }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <div style={{ maxHeight, overflow: 'auto', padding: '12px 14px' }}>
+        <pre className={mono ? 'mono' : undefined}
+          style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            fontSize: 'var(--t-xs)', lineHeight: 1.6, color: 'var(--fg-2)' }}>{text}</pre>
+      </div>
+      {truncated && (
+        <div className="mono" style={{ padding: '6px 14px', borderTop: '1px solid var(--hairline)', fontSize: 'var(--t-2xs)', color: 'var(--fg-3)' }}>
+          podgląd skrócony{size ? ' — plik ma ' + fmtBytes(size) : ''} · pobierz, żeby zobaczyć całość
+        </div>
+      )}
+    </div>
+  );
+}
+
+// `doc` — the read-me-don't-download artifact. Markdown renders formatted by
+// default (same marked + DOMPurify path as the Sync file preview); the toggle
+// exposes the raw source for copy-paste.
+function _ArtifactDoc({ artifact, scope }) {
+  const toast = useToast();
+  const [raw, setRaw] = _aUseState(false);
+  const { loading, text, truncated, size, error } = _useArtifactText(artifact, scope);
+  const isMd = _artIsMarkdown(artifact);
+  const safeMd = (!raw && isMd && text != null) ? renderMarkdown(text) : null;
+  return (
+    <WidgetFrame title={artifact.title}>
+      {loading && <div style={{ padding: 14 }}><Spinner label="ładowanie…" inline size={16} /></div>}
+      {error && <div style={{ padding: 14, fontSize: 'var(--t-sm)', color: 'var(--fg-3)' }}>nie udało się wczytać treści</div>}
+      {!loading && !error && (
+        safeMd != null
+          ? (
+            <div style={{ maxHeight: 460, overflow: 'auto', padding: '14px 16px' }}>
+              <div className="md-render" style={{ fontSize: 'var(--t-sm)', lineHeight: 1.65 }}
+                dangerouslySetInnerHTML={{ __html: safeMd }} />
+              {truncated && (
+                <div className="mono" style={{ marginTop: 10, fontSize: 'var(--t-2xs)', color: 'var(--fg-3)' }}>
+                  podgląd skrócony{size ? ' — dokument ma ' + fmtBytes(size) : ''}
+                </div>
+              )}
+            </div>
+          )
+          : <_ArtifactTextBody text={text} truncated={truncated} size={size} maxHeight={460} />
+      )}
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '8px 12px', borderTop: '1px solid var(--hairline)', flexWrap: 'wrap' }}>
+        {isMd && <Button icon="logs" onClick={() => setRaw(v => !v)}>{raw ? 'Podgląd' : 'Źródło'}</Button>}
+        <Button icon="copy" onClick={() => _artCopyText(text, toast)}>Kopiuj</Button>
+      </div>
+    </WidgetFrame>
+  );
+}
+
+// PDF read in place. Same opaque-sandbox route the backend pins the doc into,
+// so the browser's own viewer renders it without same-origin access.
+function _ArtifactPdf({ artifact, scope }) {
+  const url = artifactPreviewUrl(artifact.id, scope);
+  return (
+    <WidgetFrame title={artifact.title}>
+      <embed src={url} type="application/pdf"
+        style={{ width: '100%', height: 520, display: 'block', background: 'var(--surface-2)' }} />
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '8px 12px', borderTop: '1px solid var(--hairline)' }}>
+        <Button icon="maximize" onClick={() => window.open(url, '_blank', 'noopener')}>Pełny ekran</Button>
+      </div>
+    </WidgetFrame>
+  );
+}
+
+// A `file` whose bytes are text — show them instead of a bare download row.
+function _ArtifactTextFile({ artifact, scope }) {
+  const toast = useToast();
+  const { loading, text, truncated, size, error } = _useArtifactText(artifact, scope);
+  if (error) return <_ArtifactDownload artifact={artifact} scope={scope} />;
+  return (
+    <WidgetFrame title={artifact.title}>
+      {loading
+        ? <div style={{ padding: 14 }}><Spinner label="ładowanie…" inline size={16} /></div>
+        : <_ArtifactTextBody text={text} truncated={truncated} size={size} />}
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '8px 12px', borderTop: '1px solid var(--hairline)' }}>
+        <Button icon="copy" onClick={() => _artCopyText(text, toast)}>Kopiuj</Button>
+      </div>
+    </WidgetFrame>
+  );
+}
+
 function _ArtifactDownload({ artifact, scope }) {
   const [hover, setHover] = _aUseState(false);
   const url = artifactRawUrl(artifact.id, scope);
-  const filename = artifact.src || artifact.title || artifact.id;
+  const filename = _artFilename(artifact);
   const sizeLabel = artifact.size != null ? fmtBytes(artifact.size) : '';
   return (
     <WidgetFrame title={artifact.title}>
@@ -317,8 +483,16 @@ function renderArtifactBody(artifact, scope, siblings) {
       return <_ArtifactAudio artifact={artifact} scope={scope} siblings={siblings} />;
     case 'video':
       return <_ArtifactVideo artifact={artifact} scope={scope} siblings={siblings} />;
-    default:
+    case 'doc':
+      return <_ArtifactDoc artifact={artifact} scope={scope} />;
+    default: {
+      // `file` splits three ways: readable text, a PDF the browser can render,
+      // or opaque bytes that stay a download row.
+      const kind = _artPreviewKind(artifact);
+      if (kind === 'pdf') return <_ArtifactPdf artifact={artifact} scope={scope} />;
+      if (kind === 'text') return <_ArtifactTextFile artifact={artifact} scope={scope} />;
       return <_ArtifactDownload artifact={artifact} scope={scope} />;
+    }
   }
 }
 
@@ -327,10 +501,22 @@ function renderArtifactBody(artifact, scope, siblings) {
 function _artifactDownload(artifact, scope) {
   const link = document.createElement('a');
   link.href = artifactRawUrl(artifact.id, scope);
-  link.download = artifact.src || artifact.title || artifact.id;
+  link.download = _artFilename(artifact);
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+// Copy a text artifact's payload straight from the gallery (no modal). Pulls
+// the full preview window rather than whatever a tile happened to render.
+async function _artifactCopyPayload(artifact, scope, toast) {
+  try {
+    const r = await fetch(artifactPreviewUrl(artifact.id, scope));
+    if (!r.ok) throw new Error(String(r.status));
+    await _artCopyText(await r.text(), toast);
+  } catch (e) {
+    toast && toast('Nie udało się wczytać treści', 'err');
+  }
 }
 
 async function _artifactDuplicate(artifact, scope, toast) {
@@ -393,11 +579,30 @@ async function _artifactComment(artifact, scope, toast) {
 
 // ── card ─────────────────────────────────────────────────────────────
 
+// Text tile: the first few hundred chars of the payload, faded out at the
+// bottom, so a report/CSV/log is recognisable in the gallery without opening
+// it. One small ranged request per text tile (the route caps + truncates).
+function _ArtifactTileSnippet({ artifact, scope }) {
+  const { text, error } = _useArtifactText(artifact, scope, 400);
+  if (error || !text) return <Icon name={_ART_TYPE_ICON[artifact.type] || 'file'} size={32} color="var(--fg-3)" />;
+  return (
+    <div style={{ position: 'absolute', inset: 0, padding: '10px 12px', overflow: 'hidden', textAlign: 'left' }}>
+      <pre className="mono" style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        fontSize: 9, lineHeight: 1.5, color: 'var(--fg-3)' }}>{text}</pre>
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 44,
+        background: 'linear-gradient(to bottom, transparent, var(--surface-2))' }} />
+    </div>
+  );
+}
+
 function ArtifactCard({ artifact, scope, onOpen, siblings }) {
   const toast = useToast();
   const [confirming, setConfirming] = _aUseState(false);
   const a = artifact;
-  const thumbUrl = a.type === 'image' ? _artifactThumbUrl(a.id, scope, 256) : null;
+  const previewKind = _artPreviewKind(a);
+  // PDFs get a real page-1 raster from the thumb route, same as images.
+  const thumbUrl = (a.type === 'image' || previewKind === 'pdf')
+    ? _artifactThumbUrl(a.id, scope, 256) : null;
   const isMedia = a.type === 'audio' || a.type === 'video';
   const items = [
     { icon: 'eye', label: 'Otwórz', onClick: () => onOpen(a) },
@@ -406,6 +611,9 @@ function ArtifactCard({ artifact, scope, onOpen, siblings }) {
       : []),
     ...(isMedia && window.HubPlayer
       ? [{ icon: 'plus', label: 'Dodaj do kolejki', onClick: () => window.HubPlayer.enqueue(makeArtifactTrack(a, scope)) }]
+      : []),
+    ...(previewKind === 'text'
+      ? [{ icon: 'copy', label: 'Kopiuj treść', onClick: () => _artifactCopyPayload(a, scope, toast) }]
       : []),
     { icon: 'corner-up-left', label: 'Skomentuj', onClick: () => _artifactComment(a, scope, toast) },
     { icon: 'download', label: 'Pobierz', onClick: () => _artifactDownload(a, scope) },
@@ -421,7 +629,9 @@ function ArtifactCard({ artifact, scope, onOpen, siblings }) {
         <div style={{ position: 'relative', height: 120, background: 'var(--surface-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderTopLeftRadius: 'calc(var(--r-lg) - 1px)', borderTopRightRadius: 'calc(var(--r-lg) - 1px)' }}>
           {(a.type === 'video' || thumbUrl)
             ? <img src={a.type === 'video' ? _artifactThumbUrl(a.id, scope, 256) : thumbUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} onError={e => { e.currentTarget.style.display = 'none'; }} />
-            : <Icon name={_ART_TYPE_ICON[a.type] || 'file'} size={32} color="var(--fg-3)" />}
+            : previewKind === 'text'
+              ? <_ArtifactTileSnippet artifact={a} scope={scope} />
+              : <Icon name={_ART_TYPE_ICON[a.type] || 'file'} size={32} color="var(--fg-3)" />}
           {isMedia && window.HubPlayer && (
             <button type="button" aria-label="Odtwórz" onClick={(e) => { e.stopPropagation(); _mediaPlay(a, scope, siblings); }}
               style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
@@ -449,7 +659,13 @@ function ArtifactCard({ artifact, scope, onOpen, siblings }) {
         </div>
       </Card>
       {confirming && (
-        <Modal open onClose={() => setConfirming(false)} title="Usunąć artefakt?" width={360}>
+        // closeOnEscape: the card can sit inside the session-overlay modal
+        // (gallery), which also closes on Escape. Without registering on the
+        // shared stack (overlay-stack.js) this confirm is invisible to it, the
+        // HOST stays isTop, and Escape-to-cancel-a-delete closes the whole
+        // gallery instead. Nesting in the DOM buys no precedence — every
+        // handler is bound to `window`.
+        <Modal open onClose={() => setConfirming(false)} title="Usunąć artefakt?" width={360} closeOnEscape>
           <div style={{ padding: '4px 16px 16px', display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ fontSize: 'var(--t-sm)', color: 'var(--fg-2)' }}>„{a.title || a.id}” zostanie trwale usunięty.</div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -465,11 +681,22 @@ function ArtifactCard({ artifact, scope, onOpen, siblings }) {
 
 // ── viewer modal ─────────────────────────────────────────────────────
 
-function ArtifactViewerModal({ artifact, scope, open, onClose, siblings }) {
+// `closeOnEscape` defaults to ON: the viewer opens from a gallery that may
+// itself be inside the session overlay modal (which also closes on Escape) —
+// the shared stack (overlay-stack.js) makes one keypress peel exactly one
+// layer, innermost first, instead of closing both.
+// It is a PROP, not a hardcoded flag, because one call site renders this modal
+// while it is off screen: OrchestratorView is kept mounted under `display:none`
+// on every non-chat route so its SSE survives, and the agent's `artifact open`
+// push lands there regardless. React runs effects normally inside a hidden
+// subtree, so an invisible viewer would register on the stack and become
+// isTop — swallowing the Escape the user aimed at the overlay they can
+// actually see. That call site passes `closeOnEscape={isActive}`.
+function ArtifactViewerModal({ artifact, scope, open, onClose, siblings, closeOnEscape = true }) {
   const toast = useToast();
   if (!artifact) return null;
   return (
-    <Modal open={open} onClose={onClose} title={artifact.title || artifact.type} width={760}>
+    <Modal open={open} onClose={onClose} title={artifact.title || artifact.type} width={760} closeOnEscape={!!closeOnEscape}>
       <div style={{ padding: '4px 16px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {renderArtifactBody(artifact, scope, siblings)}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
@@ -478,6 +705,9 @@ function ArtifactViewerModal({ artifact, scope, open, onClose, siblings }) {
           )}
           {(artifact.type === 'audio' || artifact.type === 'video') && window.HubPlayer && (
             <Button icon="plus" onClick={() => { window.HubPlayer.enqueue(makeArtifactTrack(artifact, scope)); }}>Do kolejki</Button>
+          )}
+          {_artPreviewKind(artifact) === 'pdf' && (
+            <Button icon="maximize" onClick={() => window.open(artifactPreviewUrl(artifact.id, scope), '_blank', 'noopener')}>Otwórz PDF</Button>
           )}
           <Button icon="corner-up-left" onClick={() => _artifactComment(artifact, scope, toast)}>Skomentuj</Button>
           <Button icon="download" onClick={() => _artifactDownload(artifact, scope)}>Pobierz</Button>
@@ -618,9 +848,21 @@ function ArtifactGallery({ sessionId, libId, scope, compact }) {
 // Owns its OWN EventSource (eventsEsRef) — never shares the turn-stream ref,
 // so closeStream()/session-switch teardown can't kill it (and vice-versa).
 // Stays open while the panel is mounted for a session; self-heals on drop.
-function usePersistentEvents({ sessionId, onCreated, onOpen }) {
-  const cbRef = _aUseRef({ onCreated, onOpen });
-  cbRef.current = { onCreated, onOpen };
+//
+// Which callback each server event drives, and what counts as a usable frame
+// for it: artifact events wrap their payload in `{artifact:{…}}`, the geo
+// round-trip events (orchestrator-geolocation.jsx) ARE the payload. Adding a
+// row here is the whole cost of putting a new control event on this channel.
+const _EVT_ROUTES = {
+  artifact_created: { cb: 'onCreated', pick: (d) => d.artifact },
+  artifact_open: { cb: 'onOpen', pick: (d) => d.artifact },
+  geo_request: { cb: 'onGeoRequest', pick: (d) => d },
+  geo_cancelled: { cb: 'onGeoCancelled', pick: (d) => d },
+};
+
+function usePersistentEvents({ sessionId, onCreated, onOpen, onGeoRequest, onGeoCancelled }) {
+  const cbRef = _aUseRef({ onCreated, onOpen, onGeoRequest, onGeoCancelled });
+  cbRef.current = { onCreated, onOpen, onGeoRequest, onGeoCancelled };
   _aUseEffect(() => {
     if (!sessionId) return undefined;
     let closed = false;
@@ -635,15 +877,23 @@ function usePersistentEvents({ sessionId, onCreated, onOpen }) {
       }
       let data = null;
       try { data = JSON.parse(e.data); } catch (_) { return; }
-      const cb = cbRef.current[kind === 'artifact_created' ? 'onCreated' : 'onOpen'];
-      if (cb && data && data.artifact) cb(data.artifact);
+      const route = _EVT_ROUTES[kind];
+      if (!route || !data) return;
+      const cb = cbRef.current[route.cb];
+      const payload = route.pick(data);
+      if (cb && payload) cb(payload);
     };
     const open = () => {
       if (closed) return;
       es = new EventSource(apiUrl('/api/orchestrator/sessions/' + encodeURIComponent(sessionId) + '/events'));
-      es.addEventListener('artifact_created', onEvt('artifact_created'));
-      es.addEventListener('artifact_open', onEvt('artifact_open'));
-      es.onopen = () => { attempt = 0; };
+      Object.keys(_EVT_ROUTES).forEach((kind) => es.addEventListener(kind, onEvt(kind)));
+      // A hand-built EventSource sends no Last-Event-ID, so a reconnect can
+      // have missed a must-deliver frame. Geo re-polls its authoritative
+      // pending list on this; artifacts refetch on their own change event.
+      es.onopen = () => {
+        attempt = 0;
+        window.dispatchEvent(new CustomEvent('hub:geo-reconnect', { detail: { sessionId } }));
+      };
       es.onerror = () => {
         try { es.close(); } catch (_) { /* ignore */ }
         if (closed) return;

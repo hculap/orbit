@@ -1,5 +1,14 @@
 """Orchestrator prompt rendering — `~/.orchestrator/system_prompt.md` + `CLAUDE.md`.
 
+⚠ **`system_prompt.md` is NOT in the prompt stack today.** No agent receives
+this text: `PROMPT_PATH = prompts_mod.SYSTEM_PROMPT_PATH` has been a dead
+constant in `orchestrator_runner.py` / `orchestrator_runner_tmux.py` since
+commit 5f0980c — nothing reads it. The live per-agent stack is assembled by
+`agent_prompts.prompts_for_session` (general.md → orchestrator.md → identity.md
+→ custom.md) from `agent_prompts_defaults`. **Put routing / behaviour changes
+in `agent_prompts_defaults`, not here** — an edit here reaches nobody. The
+document is still rendered on disk (humans read it), so it is kept truthful.
+
 Both files are written lazily on first run. We honour user edits: a file is
 rewritten ONLY when its on-disk version header (`<!-- orch-prompt:vN -->`) is
 older than the current `PROMPT_VERSION`. In that case the existing file is
@@ -25,10 +34,12 @@ def _machine_facts() -> dict[str, str]:
         "at_url": f" at `{base}`" if base else "",
     }
 
-PROMPT_VERSION = "v18"
+PROMPT_VERSION = "v20"
 VERSION_HEADER = f"<!-- orch-prompt:{PROMPT_VERSION} -->"
 
 ORCHESTRATOR_DIR: Path = Path.home() / ".orchestrator"
+# Rendered to disk, but NOT passed to any runner — see the module docstring.
+# Behaviour changes belong in `agent_prompts_defaults.GENERAL_PROMPT_DEFAULT`.
 SYSTEM_PROMPT_PATH: Path = ORCHESTRATOR_DIR / "system_prompt.md"
 CLAUDE_MD_PATH: Path = ORCHESTRATOR_DIR / "CLAUDE.md"
 
@@ -66,16 +77,22 @@ Write plain **GitHub-flavored Markdown** — prose, lists, headings, tables, fen
 - **NEVER output a `{{"type":…}}` or `{{"blocks":[…]}}` JSON object as your reply.** The chat envelope was removed — such JSON just renders as raw text. If ANY skill's SKILL.md tells you to "emit an image/audio/etc. block" or put a `{{"type":…}}` object in your reply, that instruction is STALE — ignore it and use the `artifacts` CLI below instead.
 
 - **Choices & questions**: use the native **AskUserQuestion** tool when you want the user to pick between options, or just end your message with the question. There is no chat-side choice/ask widget anymore.
-- **Rich media → artifacts**: for anything visual, playable, downloadable, or interactive — a chart, map, YouTube embed, audio/video clip, generated image, interactive HTML page, or a file to download — do NOT inline it. Create an **artifact** with the `artifacts` CLI skill:
-  `python3 ~/.orchestrator/skills-registry/artifacts/scripts/artifacts_cli.py create --type <image|audio|video|youtube|chart|map|html|file> --title "<short>" [--open] <file-or-spec>`
-  It saves into the agent's `.artifacts/` dir and pops a toast in the browser; add `--open` to open the viewer immediately. Charts/maps/youtube take a JSON spec; html takes a raw doc; image/audio/video/file take a path. See that skill's SKILL.md for the type taxonomy + spec shapes. Artifacts show up in the per-session and per-agent gallery and can be reopened, duplicated, or downloaded.
+- **Rich media → artifacts**: for anything visual, playable, readable-at-length, downloadable, or interactive — a chart, map, YouTube embed, audio/video clip, generated image, interactive HTML page, a long document, or a file to download — do NOT inline it. Create an **artifact** with the `artifacts` CLI skill:
+  `python3 ~/.orchestrator/skills-registry/artifacts/scripts/artifacts_cli.py create --type <image|audio|video|youtube|chart|map|html|file|doc> --title "<short>" [--open] <file-or-spec>`
+  It saves into the agent's `.artifacts/` dir and pops a toast in the browser; add `--open` to open the viewer immediately. Charts/maps/youtube take a JSON spec; html takes a raw doc; image/audio/video/file take a path; **`doc` takes markdown/text directly** (raw string, a path, or `--stdin`). Artifacts show up in the per-session and per-agent gallery and can be reopened, duplicated, or downloaded.
+- **Read it or save it?** `--type doc` = the user wants to READ or COPY it in the panel (report, notes, analysis, long snippet) — it renders as formatted markdown with a Kopiuj button. `--type file` = the user wants the BYTES (csv/pdf/zip). Either way the panel now previews inline: PDFs render, text-family files show a scrollable preview with Kopiuj, and downloads keep the original filename. Never make the user download something just to read it.
+- **Panel artifact ≠ claude.ai artifact.** The CLI above is the **panel** artifact — it lands in the dashboard the user is looking at. The native **`Artifact` tool publishes to claude.ai and is invisible in this panel**, so it is NOT the default and a PreToolUse hook blocks it. When the user says "artefakt" without qualifying it, they mean the panel one. If it is genuinely ambiguous, or they ask for a shareable link / a page outside this server, **ask with AskUserQuestion first** ("artefakt w panelu" vs "artefakt claude.ai") — then, only if they picked claude.ai, run `python3 ~/.orchestrator/skills-registry/artifacts/scripts/native_artifact_guard.py allow` and retry the tool.
 - **Image generation**: run the `generate-image` skill (`uv run ~/.orchestrator/skills-registry/generate-image/scripts/generate_image.py --prompt "…"`, optional `--reference <abs-path>` per attached image), then register the produced PNG with `artifact create --type image <path> --title "…" --open`. Only on an explicit ask to generate/draw/render an image.
 
 ## Driving other agents (dashboard MCP)
 
 You have the **`dashboard` MCP** (`mcp__dashboard__*`) — typed tools to drive THIS system instead of ad-hoc `curl http://localhost:8766/...`: `list_sessions`/`search_sessions`/`create_session`/`start_session`/`stop_session` for the other PARA agent sessions, **`send_and_wait`** to delegate a task and collect the reply, `para_overview`, `notify`, and — for an interactive child — `capture_pane` + **`answer_question`** to answer its AskUserQuestion / permission prompts on the user's behalf. Prefer these tools over hand-written curl. The `dashboard-mcp` skill documents the delegation loop, fan-out, and recursive sub-orchestration. If the tools aren't present (an older session, or a non-global agent), fall back to curl.
 
-- **Async fire-and-forget** between agents (no reply blocking): use the **`a2a` CLI** (`python3 ~/.orchestrator/skills-registry/a2a/scripts/a2a_cli.py list|send --to <lib_id> "<text>"`). It drops a message into the target's inbox maildir and auto-spawns cold agents to deliver — pair it with the Monitor-armed inbox watcher described in `general.md` so replies land back in your own inbox. Use `send_and_wait` when you need the answer synchronously; `a2a send` when you just want to hand off.
+**Reaching another agent — route by whether it is live, not by habit:**
+
+- **Live peer session** → the native **`ListAgents`** + **`SendMessage`** tools. Real wake, cross-project, and its reply comes back to you on its own. The first send to a peer you have not messaged in this conversation comes back asking you to re-send with its `[ref]` — that is a confirmation gate (not name disambiguation, and not an error), re-send with it.
+- **Cold agent, or you need the answer synchronously** → dashboard MCP `send_and_wait` (or `create_session` + `start_session`). No MCP in this session (non-global agents have none): `curl -X POST "$HD_NOTIFY_URL/api/orchestrator/sessions/<id>/messages"` — get `<id>` from `a2a whois <lib_id>`.
+- **`a2a` CLI** (`python3 ~/.orchestrator/skills-registry/a2a/scripts/a2a_cli.py list|send --to <lib_id> "<text>"`) → ONLY when you deliberately want to leave a note that nobody reads until that agent's human runs `a2a inbox --drain`. It is a pure enqueue: it wakes nobody, delivers nothing, and never spawns a session.
 
 ## Attachments
 

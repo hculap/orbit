@@ -174,6 +174,12 @@ const _FWD_SHORTCUT_KEYS = new Set([
   'k', 'K', 'n', 'N', 'u', 'U', 'm', 'M',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
 ]);
+// ⌘-ONLY forwards (the overlay toggles: ⌘I Issues, ⌘G gallery). Kept out of
+// the set above because forwarding SWALLOWS the combo, and on plain Ctrl these
+// two are control characters the terminal owns: Ctrl+I *is* Tab (0x09) and
+// Ctrl+G *is* BEL (0x07). Swallowing those would break tab-completion inside
+// the pane — a far worse trade than the shortcut being ⌘-only.
+const _FWD_META_ONLY_KEYS = new Set(['i', 'I', 'g', 'G']);
 function _forwardAppShortcuts(win) {
   if (!win || win.__hubShortcutFwd) return;
   win.__hubShortcutFwd = true;
@@ -185,7 +191,12 @@ function _forwardAppShortcuts(win) {
     const isSwitcher = e.altKey && !mod && e.key === 'Tab';
     if (!isSwitcher) {
       if (!mod || e.altKey) return;
-      if (e.shiftKey || !_FWD_SHORTCUT_KEYS.has(e.key)) return;
+      if (e.shiftKey) return;
+      if (_FWD_META_ONLY_KEYS.has(e.key)) {
+        if (!e.metaKey) return;          // plain Ctrl+I/Ctrl+G stay the terminal's
+      } else if (!_FWD_SHORTCUT_KEYS.has(e.key)) {
+        return;
+      }
     }
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -302,25 +313,46 @@ function _interceptAltSelect(win, onDown, onUp) {
 // already built. We read win.term FRESH each time so a ttyd reconnect that
 // recreates the Terminal keeps working; the listener lives on the persistent
 // document, bound once.
+// Reach the parent's shared clipboard util (same-origin iframe; the win.parent
+// pattern is already used in this file) so the iOS execCommand fallback and the
+// terminal-grid text tidier apply inside the terminal too.
+function _hubClipboard(win) {
+  try {
+    return ((win && win.parent && win.parent.HubClipboard)
+      || (window.parent && window.parent.HubClipboard)
+      || window.HubClipboard) || null;
+  } catch (_e) { return null; }
+}
+
+// Read the current xterm selection, de-padded. A terminal row is always `cols`
+// cells wide, and tmux/claude's TUI pad the remainder with REAL spaces — xterm's
+// own trimRight only drops never-written cells, so a copied paragraph arrives in
+// LinkedIn/Slack with a run of spaces at the end of every line. Fresh `win.term`
+// read each time so a ttyd reconnect that recreates the Terminal keeps working.
+function _terminalSelection(win) {
+  let sel = '';
+  try {
+    const t = win.term || win.t || win.terminal;
+    if (t && typeof t.getSelection === 'function') sel = t.getSelection();
+  } catch (_e) { return ''; }
+  if (!sel) return '';
+  const HC = _hubClipboard(win);
+  if (HC && typeof HC.tidyTerminalText === 'function') {
+    try { return HC.tidyTerminalText(sel); } catch (_e) { /* fall through raw */ }
+  }
+  return sel;
+}
+
 function _bindCopyOnSelect(win, onResult) {
   if (!win || win.__hubCopySel) return !!(win && win.__hubCopySel);
   const doc = win.document;
   if (!doc) return false;
   win.__hubCopySel = true;
   doc.addEventListener('mouseup', () => {
-    let sel = '';
-    try {
-      const t = win.term || win.t || win.terminal;
-      if (t && typeof t.getSelection === 'function') sel = t.getSelection();
-    } catch (_e) { sel = ''; }
+    const sel = _terminalSelection(win);
     if (!sel || !sel.trim()) return;
     try {
-      // Reach the parent's shared util (same-origin iframe; the win.parent
-      // pattern is already used in this file) so the iOS execCommand fallback
-      // applies inside the terminal too.
-      const HC = (win.parent && win.parent.HubClipboard)
-        || (window.parent && window.parent.HubClipboard)
-        || window.HubClipboard;
+      const HC = _hubClipboard(win);
       if (HC && typeof HC.copyText === 'function') {
         HC.copyText(sel).then(
           (ok) => { if (typeof onResult === 'function') onResult(ok); },
@@ -329,6 +361,30 @@ function _bindCopyOnSelect(win, onResult) {
       }
     } catch (_e) { if (typeof onResult === 'function') onResult(false); }
   });
+  return true;
+}
+
+// Same de-padding for the NATIVE copy path. Cmd+C / Ctrl+Shift+C never reaches
+// the mouseup handler above: xterm.js mirrors the selection into a hidden
+// textarea and the browser copies it verbatim, padding included. Rewrite the
+// clipboard payload on the way out so both copy routes land tidied.
+function _bindCopyStrip(win) {
+  if (!win || win.__hubCopyStrip) return false;
+  const doc = win.document;
+  if (!doc) return false;
+  win.__hubCopyStrip = true;
+  doc.addEventListener('copy', (e) => {
+    const tidy = _terminalSelection(win);
+    if (!tidy || !tidy.trim()) return;   // not a terminal selection → default
+    try {
+      // Nothing stripped ⇒ leave the event alone rather than take over a
+      // copy the browser would have handled identically.
+      const t = win.term || win.t || win.terminal;
+      if (t && typeof t.getSelection === 'function' && t.getSelection() === tidy) return;
+      e.clipboardData.setData('text/plain', tidy);
+      e.preventDefault();
+    } catch (_e) { /* swallow — the browser's default copy still runs */ }
+  }, true);
   return true;
 }
 
@@ -955,13 +1011,26 @@ function _TermSelectButton({ active, isFs, compact, onToggle }) {
   );
 }
 
-// Mobile-only "reload terminal render" button. Takes the top-right corner that
-// the select-to-copy button occupies on desktop (on phones, copying is covered
-// by the last-message modal). Reconnects the ttyd client in place so tmux
-// repaints the pane from scratch — "reload just this session" without reloading
-// the whole page. Same position/size as the select button's mobile placement.
-function _TermReloadButton({ onReload }) {
+// "Reload terminal render". Reconnects the ttyd client in place so tmux
+// repaints the pane from scratch — reloading just THIS session instead of the
+// whole page, which on desktop would tear down every mounted session view and
+// re-fetch the session list for what is really a one-pane redraw glitch.
+//
+// Two placements, because the corner is contested:
+//   • mobile — the top-right corner itself (the select-to-copy button is
+//     hidden there; copying is covered by the last-message modal).
+//   • desktop — the 168px slot, one to the LEFT of the mic, since the corner
+//     is taken by fullscreen and then select/speak/mic step inward from it.
+function _TermReloadButton({ onReload, isFs, compact }) {
   const [hover, setHover] = _tpUseState(false);
+  // Desktop slot ladder, outward from the corner: fs 22/12 → select 60/50 →
+  // RELOAD 96/86 → speak 132/122 → mic 168/158. Reload sits third so the row
+  // reads mic → speaker → reload left-to-right, the SAME order as mobile
+  // (where the ladder runs reload 14 → speak 50 → mic 86 from the edge). It
+  // was the outermost slot at first, which put it on the opposite end from
+  // mobile. Mobile itself keeps the bare corner.
+  const right = compact ? 14 : (isFs ? 86 : 96);
+  const top = compact ? 10 : (isFs ? 12 : 16);
   return (
     <button
       onMouseDown={(e) => { try { e.preventDefault(); } catch (_e) { /* keep terminal focus */ } }}
@@ -971,7 +1040,7 @@ function _TermReloadButton({ onReload }) {
       title="Odśwież render sesji — przeładuj terminal (pełne odrysowanie tmux)"
       aria-label="Odśwież render terminala"
       style={{
-        position: 'absolute', top: 10, right: 14,
+        position: 'absolute', top, right,
         zIndex: 25, width: 30, height: 30, padding: 0,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         borderRadius: 'var(--r-sm)', cursor: 'pointer',
@@ -995,8 +1064,9 @@ function _TermReloadButton({ onReload }) {
 // pipeline), NOT the raw xterm buffer. See orchestrator.jsx onSpeakLastInTerminal.
 function _TermSpeakButton({ tts, speaking, isFs, compact, onSpeakLast }) {
   const [hover, setHover] = _tpUseState(false);
-  // Stacks one slot LEFT of select-text (select: compact?14 / isFs?50 / 60).
-  const right = compact ? 50 : (isFs ? 86 : 96);
+  // One slot LEFT of reload on desktop (reload: isFs?86 / 96); on mobile
+  // reload owns the corner, so this is one slot left of THAT (compact 50).
+  const right = compact ? 50 : (isFs ? 122 : 132);
   const top = compact ? 10 : (isFs ? 12 : 16);
   const handleClick = () => {
     if (speaking) {
@@ -1039,8 +1109,10 @@ function _TermSpeakButton({ tts, speaking, isFs, compact, onSpeakLast }) {
 // transcript for voice mode + submits.
 function _TermMicButton({ recording, isFs, compact, onToggle }) {
   const [hover, setHover] = _tpUseState(false);
-  // One slot left of the speaker (speaker: compact?50 / isFs?86 / 96).
-  const right = compact ? 86 : (isFs ? 122 : 132);
+  // One slot left of the speaker (speaker: compact?50 / isFs?122 / 132), which
+  // makes mic the outermost of the mic → speaker → reload trio on both
+  // breakpoints — the shared left-to-right order.
+  const right = compact ? 86 : (isFs ? 158 : 168);
   const top = compact ? 10 : (isFs ? 12 : 16);
   return (
     <button
@@ -1793,6 +1865,8 @@ function TerminalLiveView({ sessionId, compact, keyboardOpen, onStatusChange, tt
               if (ok) _tlToast('Skopiowano do schowka', 'ok');
               else _tlToast('Nie udało się skopiować — kliknij w terminal i zaznacz jeszcze raz', 'warn');
             });
+            // Cmd+C over an xterm selection → same de-padding as the auto-copy.
+            _bindCopyStrip(win);
             // Ctrl+V with raw image data (screenshots) → upload + paste path.
             _interceptCtrlV(win, (files) => { if (uploadFilesRef.current) uploadFilesRef.current(files); });
             // Cmd+V (paste event) with FILES — incl. Finder-copied files,
@@ -2124,8 +2198,11 @@ function TerminalLiveView({ sessionId, compact, keyboardOpen, onStatusChange, tt
       {phase === 'ready' && !compact && (
         <_TermSelectButton active={selectMode} isFs={isFs} compact={compact} onToggle={toggleSelectMode} />
       )}
-      {phase === 'ready' && compact && (
-        <_TermReloadButton onReload={reloadTerminal} />
+      {/* Reload is useful on BOTH — a desktop page refresh remounts every
+          session view to fix one pane's redraw. It just sits in a different
+          slot per breakpoint (see _TermReloadButton). */}
+      {phase === 'ready' && (
+        <_TermReloadButton onReload={reloadTerminal} isFs={isFs} compact={compact} />
       )}
       {phase === 'ready' && featureFlagEnabled && (
         <_TermSpeakButton tts={tts} speaking={isSpeaking} isFs={isFs} compact={compact} onSpeakLast={onSpeakLast} />
